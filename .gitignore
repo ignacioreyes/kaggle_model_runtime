@@ -160,3 +160,4 @@ cython_debug/
 .idea/
 
 predict-ai-model-runtime/
+layout_tfrecords/

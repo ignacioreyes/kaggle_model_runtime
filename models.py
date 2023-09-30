@@ -51,13 +51,11 @@ class MLP(Model):
         for batch in dataset:
             y_pred = self.inference_from_batch(batch)
             if return_labels:
-                label = batch[-1].numpy()
-                if len(label.shape) == 2:
-                    label = label[:, 1]
+                label = batch['target'].numpy()
                 labels.append(label)
             predictions.append(y_pred.numpy())
-            id_list.append(batch[0].numpy())
-            config_index_list.append(batch[1].numpy())
+            id_list.append(batch['layout_id'].numpy())
+            config_index_list.append(batch['config_index'].numpy())
 
         predictions = np.concatenate(predictions, axis=0)
         if return_labels:
@@ -184,7 +182,7 @@ class TileMLP(MLP):
         x = self.dense_layer_2(x)
         x = self.relu_layer(x)
         x = self.dense_layer_3(x)
-        x = tf.reshape(x, (-1, ))
+        x = tf.reshape(x, (-1,))
         return x
 
     def inference_from_batch(self, batch: tuple[tf.Tensor]) -> tf.Tensor:
@@ -213,7 +211,7 @@ class TileMLP(MLP):
 
 class LayoutMLP(MLP):
     def __init__(self, batch_size: int, learning_rate: float, mask_max_len: int):
-        super().__init__(batch_size, validation_frequency=1_000)
+        super().__init__(batch_size, validation_frequency=2_000)
         self.mask_max_len = mask_max_len
         self.normalization_layer_config_nodes = Normalization(axis=-1)
         self.normalization_layer_graph_descriptor = Normalization(axis=-1)
@@ -230,7 +228,7 @@ class LayoutMLP(MLP):
             name='dense_layer_2',
         )
         self.dense_layer_3 = Dense(
-            2,
+            1,
             name='dense_layer_3'
         )
 
@@ -249,19 +247,15 @@ class LayoutMLP(MLP):
         self.max_validations_without_improvement = 10
 
     @tf.function
-    def train_step(self, batch: tuple[tf.Tensor]):
+    def train_step(self, batch: dict[str, tf.Tensor]):
         call_input, targets = self.unpack_batch_with_labels(batch)
         with tf.GradientTape() as tape:
             y_pred = self.__call__(call_input)
-            absolute_target = targets[:, 0]
-            normalized_target = targets[:, 1]
+            absolute_target = targets
             loss_from_absolute = self.loss_computer_true_labels(
-                absolute_target, y_pred[:, 0])
+                absolute_target, y_pred)
 
-            loss_from_normalized = self.loss_computer_true_labels(
-                normalized_target, y_pred[:, 1])
-
-            loss_value = 0.2 * loss_from_absolute + loss_from_normalized \
+            loss_value = loss_from_absolute \
                          + tf.keras.regularizers.L1(l1=1e-7)(self.dense_layer_1.kernel) \
                          + tf.keras.regularizers.L1(l1=1e-7)(self.dense_layer_2.kernel)
 
@@ -278,7 +272,7 @@ class LayoutMLP(MLP):
         # node_operations.shape == (batch_size, mask_max_len)
         node_embedding = self.embedding_layer(node_operations)
         # node_embedding.shape == (batch_size, mask_max_len, embed_len)
-        
+
         x = self.normalization_layer_config_nodes(config_descriptor)
         x = tf.concat([x, node_embedding], axis=-1)
         x = self.dense_layer_1(x)
@@ -296,12 +290,15 @@ class LayoutMLP(MLP):
         x = self.dense_layer_2(x)
         x = self.relu_layer(x)
         x = self.dense_layer_3(x)
+        x = tf.reshape(x, (-1,))
         return x
 
-    def inference_from_batch(self, batch: tuple[tf.Tensor]) -> tf.Tensor:
-        tile_ids, config_indexes, config_descriptors, valid_mask, graph_descriptor = batch[:5]
+    def inference_from_batch(self, batch: dict[str, tf.Tensor]) -> tf.Tensor:
+        config_descriptors = batch['node_descriptor']
+        valid_mask = batch['valid_nodes']
+        graph_descriptor = batch['graph_descriptor']
         prediction = self.__call__((config_descriptors, valid_mask, graph_descriptor))  # TODO: call with @tf.function
-        return prediction[:, 1]
+        return prediction
 
     def compute_validation_loss(self, validation_df: pd.DataFrame) -> float:
         assert 'target' in validation_df.columns
@@ -315,15 +312,20 @@ class LayoutMLP(MLP):
         mean = np.mean(validation_df.groupby('ID').apply(compute_layout_score_group))
         return -float(mean)
 
-    def unpack_batch_with_labels(self, batch: tuple[tf.Tensor, ...]):
-        tile_ids, config_indexes, config_descriptors, valid_mask, graph_descriptor, normalized_runtimes = batch
-        return (config_descriptors, valid_mask, graph_descriptor), normalized_runtimes
+    def unpack_batch_with_labels(self, batch: dict[str, tf.Tensor]):
+        config_descriptors = batch['node_descriptor']
+        valid_mask = batch['valid_nodes']
+        graph_descriptor = batch['graph_descriptor']
+        target = batch['target']
+        return (config_descriptors, valid_mask, graph_descriptor), target
 
     def fit_normalizations(self, dataset):
         config_desc_list = []
         graph_desc_list = []
         for i, batch in enumerate(dataset):
-            tile_ids, config_indexes, config_descriptors, valid_mask, graph_descriptor, normalized_runtimes = batch
+            config_descriptors = batch['node_descriptor']
+            graph_descriptor = batch['graph_descriptor']
+
             config_desc_list.append(config_descriptors[:, :, :-1])  # last feature is not used here (layer type)
             graph_desc_list.append(graph_descriptor)
             if i == 100:
