@@ -86,12 +86,13 @@ class TileDataset:
 
 
 class LayoutDataset:
-    def __init__(self, batch_size: int, train_sample_fraction: float, subset: str, build_tfrecords: bool):
+    def __init__(self, batch_size: int, train_sample_fraction: float, subset: [str, None], build_tfrecords: bool):
         self.root_dir = 'predict-ai-model-runtime/npz_all/npz/layout/'
         self.tfrecords_dir = 'layout_tfrecords'
         self.batch_size = batch_size
         self.n_config_nodes_upper_limit = 500
         max_configs_per_graph = 10_000  # None
+        self.batch_per_file_size = 4
         self.subset = subset  # {xla, nlp}
 
         if build_tfrecords:
@@ -103,9 +104,9 @@ class LayoutDataset:
             self.create_tfrecords('valid', max_configs_per_graph=max_configs_per_graph)
 
         with tf.device('/cpu:0'):
-            self.train_data = self.load_tfrecords('train', subset)
-            self.test_data = self.load_tfrecords('test', subset)
-            self.valid_data = self.load_tfrecords('valid', subset)
+            self.train_data = self.load_tfrecords('train', subset, batch_samples_per_file=True)
+            self.test_data = self.load_tfrecords('test', subset, batch_samples_per_file=False)
+            self.valid_data = self.load_tfrecords('valid', subset, batch_samples_per_file=False)
 
     @staticmethod
     def tfrecord_decoder(record_bytes):
@@ -126,12 +127,14 @@ class LayoutDataset:
         )
         return parsed_example
 
-    def load_tfrecords(self, set_name: str, subset: str) -> tf.data.Dataset:
+    def load_tfrecords(self, set_name: str, subset: [str, None], batch_samples_per_file: bool) -> tf.data.Dataset:
         tfrecords_file_list = os.listdir(self.tfrecords_dir)
         selected_filenames = []
         for filename in tfrecords_file_list:
             f = filename[:-(len('.tfrecords'))].split(':')
-            if f[-1] == set_name and f[1] == subset:
+            if f[-1] != set_name:
+                continue
+            if subset is None or f[1] == subset:
                 selected_filenames.append(
                     os.path.join(self.tfrecords_dir, filename))
 
@@ -139,15 +142,25 @@ class LayoutDataset:
 
         def interleave_fn(filename: str) -> tf.data.Dataset:
             dataset = tf.data.TFRecordDataset(filename, compression_type='GZIP')
-            dataset = dataset.map(self.tfrecord_decoder)
-            dataset = dataset.shuffle(buffer_size=10)
+            dataset = dataset.map(self.tfrecord_decoder, num_parallel_calls=tf.data.AUTOTUNE)
+            dataset = dataset.shuffle(buffer_size=20)
+            if batch_samples_per_file:
+                dataset = dataset.batch(self.batch_per_file_size, drop_remainder=True)
             return dataset
 
         dataset = dataset.interleave(
             interleave_fn,
             cycle_length=10, num_parallel_calls=tf.data.AUTOTUNE,
             deterministic=False)
-        dataset = dataset.batch(self.batch_size).prefetch(5)
+        if batch_samples_per_file:
+            dataset = dataset.unbatch()
+            batch_size = (self.batch_size // self.batch_per_file_size)
+            batch_size = int(batch_size * self.batch_per_file_size)
+            dataset = dataset.batch(batch_size)
+        else:
+            dataset = dataset.batch(self.batch_size)
+
+        dataset = dataset.prefetch(tf.data.AUTOTUNE)
         return dataset
 
     def _list_filenames(self, set_name: str) -> List[str]:
@@ -435,10 +448,10 @@ class LayoutDataset:
 
 
 if __name__ == '__main__':
-    dataset = LayoutDataset(batch_size=64, train_sample_fraction=1.0, subset='nlp', build_tfrecords=False)
+    dataset = LayoutDataset(batch_size=64, train_sample_fraction=1.0, subset=None, build_tfrecords=False)
     # dataset = TileDataset(batch_size=64)
 
-    for i, sample in enumerate(dataset.valid_data):
+    for i, sample in enumerate(dataset.train_data):
         print(sample)
         if i == 2:
             break

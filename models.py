@@ -6,6 +6,7 @@ from tensorflow.keras.layers import Dense
 from tensorflow.keras.layers import Normalization
 from tensorflow.keras.layers import ReLU
 from tensorflow.keras.layers import Embedding
+import tensorflow_ranking as tfr
 from scipy.stats import kendalltau
 from abc import abstractmethod
 
@@ -211,8 +212,9 @@ class TileMLP(MLP):
 
 class LayoutMLP(MLP):
     def __init__(self, batch_size: int, learning_rate: float, mask_max_len: int):
-        super().__init__(batch_size, validation_frequency=2_000)
+        super().__init__(batch_size, validation_frequency=10_000)
         self.mask_max_len = mask_max_len
+        self.batch_per_file_size = 4
         self.normalization_layer_config_nodes = Normalization(axis=-1)
         self.normalization_layer_graph_descriptor = Normalization(axis=-1)
         self.dense_layer_1 = Dense(
@@ -237,25 +239,26 @@ class LayoutMLP(MLP):
 
         lr_schedule = tf.keras.optimizers.schedules.ExponentialDecay(
             initial_learning_rate=learning_rate,
-            decay_steps=1_000,
+            decay_steps=10_000,
             decay_rate=0.9,
             staircase=True)
 
         self.optimizer = tf.keras.optimizers.Adam(learning_rate=lr_schedule)
-        self.loss_computer_true_labels = tf.keras.losses.MeanAbsoluteError()
+        self.loss_computer = tfr.keras.losses.PairwiseHingeLoss()
 
-        self.max_validations_without_improvement = 10
+        self.max_validations_without_improvement = 100
 
     @tf.function
     def train_step(self, batch: dict[str, tf.Tensor]):
         call_input, targets = self.unpack_batch_with_labels(batch)
         with tf.GradientTape() as tape:
             y_pred = self.__call__(call_input)
-            absolute_target = targets
-            loss_from_absolute = self.loss_computer_true_labels(
-                absolute_target, y_pred)
+            loss_value = self.loss_computer(
+                tf.reshape(targets, (-1, self.batch_per_file_size)),
+                tf.reshape(y_pred, (-1, self.batch_per_file_size))
+            )
 
-            loss_value = loss_from_absolute \
+            loss_value = loss_value \
                          + tf.keras.regularizers.L1(l1=1e-7)(self.dense_layer_1.kernel) \
                          + tf.keras.regularizers.L1(l1=1e-7)(self.dense_layer_2.kernel)
 
@@ -304,9 +307,7 @@ class LayoutMLP(MLP):
         assert 'target' in validation_df.columns
 
         def compute_layout_score_group(df):
-            predicted_order = df.sort_values('prediction')['config_index'].values
-            true_order = df.sort_values('target')['config_index'].values
-            score, _ = kendalltau(predicted_order, true_order)
+            score, _ = kendalltau(df['prediction'], df['target'])
             return score
 
         mean = np.mean(validation_df.groupby('ID').apply(compute_layout_score_group))
