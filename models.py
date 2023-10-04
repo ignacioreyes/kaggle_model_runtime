@@ -16,13 +16,17 @@ class MLP(Model):
         super().__init__()
         self.batch_size = batch_size
         self.validation_frequency = validation_frequency
+        self.debug = False
+
+        self.validations_without_improvement = 0
+        self.best_historic_loss = np.inf
 
     @abstractmethod
     def unpack_batch_with_labels(self, batch: tuple[tf.Tensor, ...]):
         pass
 
     @tf.function
-    def train_step(self, batch: tuple[tf.Tensor]):
+    def train_step(self, batch: dict[str, tf.Tensor]):
         call_input, target = self.unpack_batch_with_labels(batch)
         with tf.GradientTape() as tape:
             y_pred = self.__call__(call_input)
@@ -96,9 +100,6 @@ class MLP(Model):
         iteration = 0
         epoch = 0
 
-        self.validations_without_improvement = 0
-        self.best_historic_loss = np.inf
-
         should_stop = False
         while not should_stop:
             for batch in training_dataset:
@@ -111,8 +112,15 @@ class MLP(Model):
                         'training loss', training_loss.numpy(),
                         f'lr {self.optimizer.learning_rate.numpy():.5f}')
 
+                if self.debug and iteration == 150:
+                    tf.profiler.experimental.start('tf_profile_dir')
+                if self.debug and iteration == 250:
+                    tf.profiler.experimental.stop()
+                    return
+
                 if iteration % self.validation_frequency == 0:
-                    val_df = self.predict_over_dataset(validation_dataset, return_labels=True)
+                    val_df = self.predict_over_dataset(
+                        validation_dataset, return_labels=True)
                     validation_loss = self.compute_validation_loss(val_df)
                     print(f'epoch {epoch}, it {iteration} validation loss {validation_loss:.3f}')
                     should_stop = self._evaluate_training_stopper(validation_loss)
@@ -212,19 +220,19 @@ class TileMLP(MLP):
 
 class LayoutMLP(MLP):
     def __init__(self, batch_size: int, learning_rate: float, mask_max_len: int):
-        super().__init__(batch_size, validation_frequency=10_000)
+        super().__init__(batch_size, validation_frequency=20_000)
         self.mask_max_len = mask_max_len
         self.batch_per_file_size = 4
         self.normalization_layer_config_nodes = Normalization(axis=-1)
         self.normalization_layer_graph_descriptor = Normalization(axis=-1)
         self.dense_layer_1 = Dense(
-            100,
+            120,
             activation=None,
             kernel_initializer='he_uniform',
             name='dense_layer_1',
         )  # kernel: (18, 100)
         self.dense_layer_2 = Dense(
-            25,
+            30,
             activation=None,
             kernel_initializer='he_uniform',
             name='dense_layer_2',
@@ -239,7 +247,7 @@ class LayoutMLP(MLP):
 
         lr_schedule = tf.keras.optimizers.schedules.ExponentialDecay(
             initial_learning_rate=learning_rate,
-            decay_steps=10_000,
+            decay_steps=20_000,
             decay_rate=0.9,
             staircase=True)
 
@@ -296,22 +304,38 @@ class LayoutMLP(MLP):
         x = tf.reshape(x, (-1,))
         return x
 
+    @tf.function
     def inference_from_batch(self, batch: dict[str, tf.Tensor]) -> tf.Tensor:
         config_descriptors = batch['node_descriptor']
         valid_mask = batch['valid_nodes']
         graph_descriptor = batch['graph_descriptor']
-        prediction = self.__call__((config_descriptors, valid_mask, graph_descriptor))  # TODO: call with @tf.function
+        prediction = self.__call__((config_descriptors, valid_mask, graph_descriptor))
         return prediction
 
     def compute_validation_loss(self, validation_df: pd.DataFrame) -> float:
         assert 'target' in validation_df.columns
 
+        def get_set_name_from_id(bin_id):
+            x = bin_id.decode('UTF-8')
+            x = x.split(':')
+            x = x[:3]
+            x = ':'.join(x)
+            return x
+
+        validation_df['subset'] = validation_df['ID'].map(get_set_name_from_id)
+
         def compute_layout_score_group(df):
             score, _ = kendalltau(df['prediction'], df['target'])
             return score
 
-        mean = np.mean(validation_df.groupby('ID').apply(compute_layout_score_group))
-        return -float(mean)
+        set_means = []
+        for subset in validation_df['subset'].unique():
+            val_subset = validation_df[validation_df['subset'] == subset]
+            mean = np.mean(val_subset.groupby('ID').apply(compute_layout_score_group))
+            print(subset, mean)
+            set_means.append(mean)
+
+        return -float(np.mean(set_means))
 
     def unpack_batch_with_labels(self, batch: dict[str, tf.Tensor]):
         config_descriptors = batch['node_descriptor']

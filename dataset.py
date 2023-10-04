@@ -2,6 +2,7 @@ import os
 import numpy as np
 from tqdm import tqdm
 import tensorflow as tf
+import random
 from typing import List
 
 
@@ -104,9 +105,12 @@ class LayoutDataset:
             self.create_tfrecords('valid', max_configs_per_graph=max_configs_per_graph)
 
         with tf.device('/cpu:0'):
-            self.train_data = self.load_tfrecords('train', subset, batch_samples_per_file=True)
-            self.test_data = self.load_tfrecords('test', subset, batch_samples_per_file=False)
-            self.valid_data = self.load_tfrecords('valid', subset, batch_samples_per_file=False)
+            self.train_data = self.load_tfrecords(
+                'train', subset, batch_samples_per_file=True)
+            self.test_data = self.load_tfrecords(
+                'test', subset, batch_samples_per_file=False)
+            self.valid_data = self.load_tfrecords(
+                'valid', subset, batch_samples_per_file=False)
 
     @staticmethod
     def tfrecord_decoder(record_bytes):
@@ -127,7 +131,12 @@ class LayoutDataset:
         )
         return parsed_example
 
-    def load_tfrecords(self, set_name: str, subset: [str, None], batch_samples_per_file: bool) -> tf.data.Dataset:
+    def load_tfrecords(
+            self,
+            set_name: str,
+            subset: [str, None],
+            batch_samples_per_file: bool) -> tf.data.Dataset:
+
         tfrecords_file_list = os.listdir(self.tfrecords_dir)
         selected_filenames = []
         for filename in tfrecords_file_list:
@@ -138,6 +147,7 @@ class LayoutDataset:
                 selected_filenames.append(
                     os.path.join(self.tfrecords_dir, filename))
 
+        random.shuffle(selected_filenames)  # inplace
         dataset = tf.data.Dataset.from_tensor_slices(selected_filenames)
 
         def interleave_fn(filename: str) -> tf.data.Dataset:
@@ -153,10 +163,9 @@ class LayoutDataset:
             cycle_length=10, num_parallel_calls=tf.data.AUTOTUNE,
             deterministic=False)
         if batch_samples_per_file:
-            dataset = dataset.unbatch()
             batch_size = (self.batch_size // self.batch_per_file_size)
             batch_size = int(batch_size * self.batch_per_file_size)
-            dataset = dataset.batch(batch_size)
+            dataset = dataset.rebatch(batch_size)
         else:
             dataset = dataset.batch(self.batch_size)
 
@@ -182,94 +191,6 @@ class LayoutDataset:
                 filenames_list.append(full_filename)
 
         return filenames_list
-
-    # def _get_dataset_from_filenames(self, filenames: List[str], set_name: str, max_configs_per_graph: int) -> tf.data.Dataset:
-    #     layout_ids = []
-    #     config_indexes = []
-    #     config_descriptors = []
-    #     graph_descriptors = []
-    #     n_valid_nodes_list = []
-    #     if set_name != 'test':
-    #         runtimes = []
-    #
-    #     for filename in tqdm(filenames, desc=f'loading {set_name}'):
-    #         layout_dict = dict(np.load(filename))
-    #
-    #         filename_split = filename.split('/')
-    #         filename = filename_split[-1][:-len('.npz')]
-    #         layout_id = f'layout:{filename_split[-4]}:{filename_split[-3]}:{filename}'
-    #
-    #         n_configs = len(layout_dict['config_runtime'])
-    #         config_sample = np.arange(n_configs)
-    #         if max_configs_per_graph is not None:
-    #             if n_configs > max_configs_per_graph:
-    #                 config_sample = np.random.choice(config_sample, max_configs_per_graph)
-    #
-    #         if set_name != 'test':
-    #             target = layout_dict['config_runtime'][config_sample]
-    #             normalized_target = target / np.min(target)
-    #             target = np.stack([target, normalized_target], axis=-1)
-    #             target = np.log(target)
-    #             runtimes.append(target)
-    #
-    #         adjacency_matrix = self.compute_adjacency_matrix(
-    #             layout_dict['edge_index'], len(layout_dict['node_opcode']))
-    #         graph_descriptor = self.compute_graph_descriptor(layout_dict['node_opcode'])
-    #         node_config_feat, n_valid_nodes = self.compute_node_descriptors(
-    #             layout_dict, config_sample, adjacency_matrix)
-    #
-    #         layout_ids.append([layout_id]*len(config_sample))
-    #         config_indexes.append(config_sample)
-    #         config_descriptors.append(node_config_feat)
-    #         n_valid_nodes_list.append(n_valid_nodes)
-    #         graph_descriptors.append(np.tile(graph_descriptor, (len(config_sample), 1)))
-    #
-    #     layout_ids = np.concatenate(layout_ids, axis=0)
-    #     config_indexes = np.concatenate(config_indexes, axis=0).astype(np.int32)
-    #     config_descriptors = np.concatenate(config_descriptors, axis=0)
-    #     n_valid_nodes_list = np.concatenate(n_valid_nodes_list, axis=0)
-    #     graph_descriptors = np.concatenate(graph_descriptors, axis=0)
-    #
-    #     if set_name != 'test':
-    #         runtimes = np.concatenate(runtimes, axis=0).astype(np.float32)
-    #
-    #     # From arrays to datasets
-    #     if set_name == 'train':
-    #         # shuffling
-    #         train_len = len(layout_ids)
-    #         print(f'permutating {train_len} training samples')
-    #
-    #         new_order = np.random.permutation(np.arange(train_len))
-    #
-    #         tile_ids = [layout_ids[i] for i in new_order]
-    #         config_indexes = config_indexes[new_order]
-    #         config_descriptors = config_descriptors[new_order]
-    #         runtimes = runtimes[new_order]
-    #         n_valid_nodes_list = n_valid_nodes_list[new_order]
-    #         graph_descriptors = graph_descriptors[new_order]
-    #
-    #         print('creating training tf.data.Dataset')
-    #         tf_dataset = tf.data.Dataset.from_tensor_slices(
-    #             (tile_ids, config_indexes, config_descriptors,
-    #              n_valid_nodes_list, graph_descriptors, runtimes))
-    #         tf_dataset = tf_dataset.shuffle(buffer_size=100).batch(self.batch_size)
-    #         # config_descriptors(batch).shape = (batch_size, n_config_nodes_upper_limit, 18)
-    #
-    #     elif set_name == 'valid':
-    #         print('creating validation tf.data.Dataset')
-    #         tf_dataset = tf.data.Dataset.from_tensor_slices(
-    #             (layout_ids, config_indexes, config_descriptors,
-    #              n_valid_nodes_list, graph_descriptors, runtimes))
-    #         tf_dataset = tf_dataset.batch(self.batch_size)
-    #
-    #     else:
-    #         print('creating test tf.data.Dataset')
-    #         tf_dataset = tf.data.Dataset.from_tensor_slices(
-    #             (layout_ids, config_indexes, config_descriptors,
-    #              graph_descriptors, n_valid_nodes_list))
-    #         tf_dataset = tf_dataset.batch(self.batch_size)
-    #
-    #     return tf_dataset
 
     def compute_adjacency_matrix(self, edges: np.array, n_nodes: int) -> np.array:
         adjacency_matrix = np.zeros((n_nodes, n_nodes), dtype=int)
@@ -365,7 +286,12 @@ class LayoutDataset:
         parent_output_shapes = np.stack(parent_output_shapes_list, axis=0)
         return parent_output_shapes
 
-    def create_tfrecords(self, set_name: str, sample_fraction: float = 1.0, max_configs_per_graph: int = None):
+    def create_tfrecords(
+            self,
+            set_name: str,
+            sample_fraction: float = 1.0,
+            max_configs_per_graph: int = None):
+        
         filenames_list = self._list_filenames(set_name)
         if sample_fraction != 1.0:
             n = len(filenames_list)
@@ -375,9 +301,8 @@ class LayoutDataset:
 
         if not os.path.exists(self.tfrecords_dir):
             os.mkdir(self.tfrecords_dir)
-        self.write_tfrecords(filenames_list, set_name, max_configs_per_graph, self.tfrecords_dir)
-        # dataset = self._get_dataset_from_filenames(filenames_list, set_name, max_configs_per_graph)
-        # return dataset
+        self.write_tfrecords(
+            filenames_list, set_name, max_configs_per_graph, self.tfrecords_dir)
 
     def compute_graph_descriptor(self, node_opcodes):
         nodes, counts = np.unique(node_opcodes, return_counts=True)
@@ -390,7 +315,13 @@ class LayoutDataset:
         descriptor = np.concatenate([descriptor, np.array([np.log(n_nodes)])])
         return descriptor
 
-    def write_tfrecords(self, filenames: List[str], set_name: str, max_configs_per_graph: int, output_folder: str):
+    def write_tfrecords(
+            self,
+            filenames: List[str],
+            set_name: str,
+            max_configs_per_graph: int,
+            output_folder: str):
+        
         for filename in filenames:  # tqdm(filenames, desc=f'loading {set_name}'):
             layout_dict = dict(np.load(filename))
 
@@ -448,7 +379,11 @@ class LayoutDataset:
 
 
 if __name__ == '__main__':
-    dataset = LayoutDataset(batch_size=64, train_sample_fraction=1.0, subset=None, build_tfrecords=False)
+    dataset = LayoutDataset(
+        batch_size=64,
+        train_sample_fraction=1.0,
+        subset=None,
+        build_tfrecords=False)
     # dataset = TileDataset(batch_size=64)
 
     for i, sample in enumerate(dataset.train_data):
