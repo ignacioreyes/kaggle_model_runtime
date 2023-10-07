@@ -220,7 +220,7 @@ class TileMLP(MLP):
 
 class LayoutMLP(MLP):
     def __init__(self, batch_size: int, learning_rate: float, mask_max_len: int):
-        super().__init__(batch_size, validation_frequency=20_000)
+        super().__init__(batch_size, validation_frequency=10_000)
         self.mask_max_len = mask_max_len
         self.batch_per_file_size = 4
         self.normalization_layer_config_nodes = Normalization(axis=-1)
@@ -243,7 +243,20 @@ class LayoutMLP(MLP):
         )
 
         self.relu_layer = ReLU(max_value=50.0, negative_slope=0.01)
-        self.embedding_layer = Embedding(121, 32, input_length=mask_max_len)
+        self.embedding_layer_node_ops = Embedding(121, 32, input_length=mask_max_len)
+
+        self.text_vectorization = tf.keras.layers.TextVectorization(
+            standardize=None,
+            split=None,
+            output_mode='int',
+            vocabulary=[
+                b'layoutnlpdefault',
+                b'layoutnlprandom',
+                b'layoutxladefault',
+                b'layoutxlarandom'
+            ]
+        )
+        self.embedding_layer_subset_info = Embedding(6, 6, input_length=1)
 
         lr_schedule = tf.keras.optimizers.schedules.ExponentialDecay(
             initial_learning_rate=learning_rate,
@@ -276,12 +289,23 @@ class LayoutMLP(MLP):
         return loss_value
 
     def call(self, x):
-        config_descriptor, valid_mask, graph_descriptor = x
+        layout_ids, config_descriptor, valid_mask, graph_descriptor = x
+
+        subset_info = tf.map_fn(
+            lambda layout_id: tf.strings.reduce_join(
+                tf.strings.split(layout_id, ":")[:3]),
+            layout_ids
+        )
+        subset_info = self.text_vectorization(subset_info)
+        subset_info = tf.expand_dims(subset_info, axis=-1)
+        subset_info = self.embedding_layer_subset_info(subset_info)
+        subset_info = subset_info[:, 0, :]
+
         node_operations = config_descriptor[:, :, -1]
         config_descriptor = config_descriptor[:, :, :-1]
         node_operations = tf.cast(node_operations, tf.int32)
         # node_operations.shape == (batch_size, mask_max_len)
-        node_embedding = self.embedding_layer(node_operations)
+        node_embedding = self.embedding_layer_node_ops(node_operations)
         # node_embedding.shape == (batch_size, mask_max_len, embed_len)
 
         x = self.normalization_layer_config_nodes(config_descriptor)
@@ -297,7 +321,7 @@ class LayoutMLP(MLP):
         x = tf.reduce_mean(x, axis=1)
 
         normal_graph_descriptor = self.normalization_layer_graph_descriptor(graph_descriptor)
-        x = tf.concat([x, normal_graph_descriptor], axis=-1)
+        x = tf.concat([x, normal_graph_descriptor, subset_info], axis=-1)
         x = self.dense_layer_2(x)
         x = self.relu_layer(x)
         x = self.dense_layer_3(x)
@@ -306,10 +330,11 @@ class LayoutMLP(MLP):
 
     @tf.function
     def inference_from_batch(self, batch: dict[str, tf.Tensor]) -> tf.Tensor:
+        layout_ids = batch['layout_id']
         config_descriptors = batch['node_descriptor']
         valid_mask = batch['valid_nodes']
         graph_descriptor = batch['graph_descriptor']
-        prediction = self.__call__((config_descriptors, valid_mask, graph_descriptor))
+        prediction = self.__call__((layout_ids, config_descriptors, valid_mask, graph_descriptor))
         return prediction
 
     def compute_validation_loss(self, validation_df: pd.DataFrame) -> float:
@@ -338,11 +363,12 @@ class LayoutMLP(MLP):
         return -float(np.mean(set_means))
 
     def unpack_batch_with_labels(self, batch: dict[str, tf.Tensor]):
+        layout_ids = batch['layout_id']
         config_descriptors = batch['node_descriptor']
         valid_mask = batch['valid_nodes']
         graph_descriptor = batch['graph_descriptor']
         target = batch['target']
-        return (config_descriptors, valid_mask, graph_descriptor), target
+        return (layout_ids, config_descriptors, valid_mask, graph_descriptor), target
 
     def fit_normalizations(self, dataset):
         config_desc_list = []
