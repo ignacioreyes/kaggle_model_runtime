@@ -220,7 +220,7 @@ class TileMLP(MLP):
 
 class LayoutMLP(MLP):
     def __init__(self, batch_size: int, learning_rate: float, mask_max_len: int):
-        super().__init__(batch_size, validation_frequency=10_000)
+        super().__init__(batch_size, validation_frequency=20_000)
         self.mask_max_len = mask_max_len
         self.batch_per_file_size = 4
         self.normalization_layer_config_nodes = Normalization(axis=-1)
@@ -242,7 +242,7 @@ class LayoutMLP(MLP):
             name='dense_layer_3'
         )
 
-        self.relu_layer = ReLU(max_value=50.0, negative_slope=0.01)
+        self.relu_layer = ReLU(negative_slope=0.01)
         self.embedding_layer_node_ops = Embedding(121, 32, input_length=mask_max_len)
 
         self.text_vectorization = tf.keras.layers.TextVectorization(
@@ -291,11 +291,13 @@ class LayoutMLP(MLP):
     def call(self, x):
         layout_ids, config_descriptor, valid_mask, graph_descriptor = x
 
-        subset_info = tf.map_fn(
-            lambda layout_id: tf.strings.reduce_join(
-                tf.strings.split(layout_id, ":")[:3]),
-            layout_ids
-        )
+        with tf.device('/cpu:0'):
+            subset_info = tf.map_fn(
+                lambda layout_id: tf.strings.reduce_join(
+                    tf.strings.split(layout_id, ":")[:3]),
+                layout_ids
+            )
+
         subset_info = self.text_vectorization(subset_info)
         subset_info = tf.expand_dims(subset_info, axis=-1)
         subset_info = self.embedding_layer_subset_info(subset_info)
@@ -309,6 +311,8 @@ class LayoutMLP(MLP):
         # node_embedding.shape == (batch_size, mask_max_len, embed_len)
 
         x = self.normalization_layer_config_nodes(config_descriptor)
+        normal_graph_descriptor = self.normalization_layer_graph_descriptor(graph_descriptor)
+
         x = tf.concat([x, node_embedding], axis=-1)
         x = self.dense_layer_1(x)
         x = self.relu_layer(x)  # (batch_size, n_config_nodes_upper_limit, n_units)
@@ -320,7 +324,6 @@ class LayoutMLP(MLP):
         x = x * float_mask
         x = tf.reduce_mean(x, axis=1)
 
-        normal_graph_descriptor = self.normalization_layer_graph_descriptor(graph_descriptor)
         x = tf.concat([x, normal_graph_descriptor, subset_info], axis=-1)
         x = self.dense_layer_2(x)
         x = self.relu_layer(x)
@@ -354,7 +357,13 @@ class LayoutMLP(MLP):
             return score
 
         set_means = []
-        for subset in validation_df['subset'].unique():
+        subsets = [
+            'layout:nlp:random',
+            'layout:nlp:default',
+            'layout:xla:random',
+            'layout:xla:default',
+        ]
+        for subset in subsets:
             val_subset = validation_df[validation_df['subset'] == subset]
             mean = np.mean(val_subset.groupby('ID').apply(compute_layout_score_group))
             print(subset, mean)

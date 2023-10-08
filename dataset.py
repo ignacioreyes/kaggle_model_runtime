@@ -3,6 +3,7 @@ import numpy as np
 from tqdm import tqdm
 import tensorflow as tf
 import random
+from collections import defaultdict
 from typing import List
 
 
@@ -105,12 +106,9 @@ class LayoutDataset:
             self.create_tfrecords('valid', max_configs_per_graph=max_configs_per_graph)
 
         with tf.device('/cpu:0'):
-            self.train_data = self.load_tfrecords(
-                'train', subset, batch_samples_per_file=True)
-            self.test_data = self.load_tfrecords(
-                'test', subset, batch_samples_per_file=False)
-            self.valid_data = self.load_tfrecords(
-                'valid', subset, batch_samples_per_file=False)
+            self.train_data = self.load_tfrecords('train')
+            self.test_data = self.load_tfrecords('test')
+            self.valid_data = self.load_tfrecords('valid')
 
     @staticmethod
     def tfrecord_decoder(record_bytes):
@@ -131,30 +129,55 @@ class LayoutDataset:
         )
         return parsed_example
 
-    def load_tfrecords(
-            self,
-            set_name: str,
-            subset: [str, None],
-            batch_samples_per_file: bool) -> tf.data.Dataset:
+    def load_tfrecords(self, set_name: str) -> tf.data.Dataset:
+        assert set_name in ('train', 'valid', 'test')
 
         tfrecords_file_list = os.listdir(self.tfrecords_dir)
-        selected_filenames = []
+        filenames_dict = defaultdict(list)
+
         for filename in tfrecords_file_list:
             f = filename[:-(len('.tfrecords'))].split(':')
             if f[-1] != set_name:
                 continue
-            if subset is None or f[1] == subset:
-                selected_filenames.append(
-                    os.path.join(self.tfrecords_dir, filename))
 
-        random.shuffle(selected_filenames)  # inplace
-        dataset = tf.data.Dataset.from_tensor_slices(selected_filenames)
+            if set_name == 'train':
+                key = ':'.join(f[:3])
+            else:
+                key = 'all_filenames'
+            filenames_dict[key].append(
+                os.path.join(self.tfrecords_dir, filename))
+
+        datasets = []
+        for v in filenames_dict.values():
+            random.shuffle(v)  # inplace
+            datasets.append(self.build_dataset_from_filenames(v, set_name))
+
+        if set_name == 'train':
+            datasets = [dataset.repeat() for dataset in datasets]
+            final_dataset = tf.data.Dataset.sample_from_datasets(
+                datasets,
+                stop_on_empty_dataset=True
+            )
+            batch_size = (self.batch_size // self.batch_per_file_size) * self.batch_per_file_size
+            batch_size = int(batch_size)
+            final_dataset = final_dataset.rebatch(batch_size)
+        else:
+            final_dataset = datasets[0]
+            final_dataset = final_dataset.batch(self.batch_size)
+
+        final_dataset = final_dataset.prefetch(10)
+
+        return final_dataset
+
+    def build_dataset_from_filenames(self, filenames: List[str], set_name: str) -> tf.data.Dataset:
+        assert set_name in ('train', 'valid', 'test')
+        dataset = tf.data.Dataset.from_tensor_slices(filenames)
 
         def interleave_fn(filename: str) -> tf.data.Dataset:
             dataset = tf.data.TFRecordDataset(filename, compression_type='GZIP')
             dataset = dataset.map(self.tfrecord_decoder, num_parallel_calls=tf.data.AUTOTUNE)
             dataset = dataset.shuffle(buffer_size=20)
-            if batch_samples_per_file:
+            if set_name == 'train':
                 dataset = dataset.batch(self.batch_per_file_size, drop_remainder=True)
             return dataset
 
@@ -162,14 +185,6 @@ class LayoutDataset:
             interleave_fn,
             cycle_length=10, num_parallel_calls=tf.data.AUTOTUNE,
             deterministic=False)
-        if batch_samples_per_file:
-            batch_size = (self.batch_size // self.batch_per_file_size)
-            batch_size = int(batch_size * self.batch_per_file_size)
-            dataset = dataset.rebatch(batch_size)
-        else:
-            dataset = dataset.batch(self.batch_size)
-
-        dataset = dataset.prefetch(tf.data.AUTOTUNE)
         return dataset
 
     def _list_filenames(self, set_name: str) -> List[str]:
