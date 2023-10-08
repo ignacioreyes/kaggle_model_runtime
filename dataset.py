@@ -88,13 +88,22 @@ class TileDataset:
 
 
 class LayoutDataset:
-    def __init__(self, batch_size: int, train_sample_fraction: float, subset: [str, None], build_tfrecords: bool):
+    def __init__(
+            self,
+            batch_size: int,
+            train_sample_fraction: float,
+            subset: [str, None],
+            build_tfrecords: bool,
+            batch_per_file_size: int
+    ):
         self.root_dir = 'predict-ai-model-runtime/npz_all/npz/layout/'
-        self.tfrecords_dir = 'layout_tfrecords'
+        self.tfrecords_dir = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)),
+            'layout_tfrecords')
         self.batch_size = batch_size
         self.n_config_nodes_upper_limit = 500
         max_configs_per_graph = 10_000  # None
-        self.batch_per_file_size = 4
+        self.batch_per_file_size = batch_per_file_size
         self.subset = subset  # {xla, nlp}
 
         if build_tfrecords:

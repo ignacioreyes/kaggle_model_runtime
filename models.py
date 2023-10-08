@@ -9,6 +9,7 @@ from tensorflow.keras.layers import Embedding
 import tensorflow_ranking as tfr
 from scipy.stats import kendalltau
 from abc import abstractmethod
+from typing import List
 
 
 class MLP(Model):
@@ -92,9 +93,11 @@ class MLP(Model):
 
     def train(
             self,
-            training_dataset: tf.data.Dataset,
-            validation_dataset: tf.data.Dataset):
+            dataset,
+            validation_callback=None):
 
+        training_dataset = dataset.train_data
+        validation_dataset = dataset.valid_data
         self.fit_normalizations(training_dataset)
 
         iteration = 0
@@ -123,6 +126,8 @@ class MLP(Model):
                         validation_dataset, return_labels=True)
                     validation_loss = self.compute_validation_loss(val_df)
                     print(f'epoch {epoch}, it {iteration} validation loss {validation_loss:.3f}')
+                    if validation_callback is not None:
+                        validation_callback(iteration, -validation_loss)
                     should_stop = self._evaluate_training_stopper(validation_loss)
                     if should_stop:
                         print('stopping training')
@@ -219,31 +224,57 @@ class TileMLP(MLP):
 
 
 class LayoutMLP(MLP):
-    def __init__(self, batch_size: int, learning_rate: float, mask_max_len: int):
-        super().__init__(batch_size, validation_frequency=20_000)
+    def __init__(
+            self,
+            batch_size: int,
+            learning_rate: float,
+            mask_max_len: int,
+            validation_frequency: int,
+            batch_per_file_size: int,
+            layer_sizes: List[int],
+            decay_rate: float,
+            validations_without_improvement: int,
+            node_embedding_size: int
+    ):
+        super().__init__(batch_size, validation_frequency=validation_frequency)
         self.mask_max_len = mask_max_len
-        self.batch_per_file_size = 4
+        self.batch_per_file_size = batch_per_file_size
         self.normalization_layer_config_nodes = Normalization(axis=-1)
         self.normalization_layer_graph_descriptor = Normalization(axis=-1)
-        self.dense_layer_1 = Dense(
-            120,
+        self.dense_layer_node_1 = Dense(
+            layer_sizes[0],
             activation=None,
             kernel_initializer='he_uniform',
-            name='dense_layer_1',
-        )  # kernel: (18, 100)
-        self.dense_layer_2 = Dense(
-            30,
-            activation=None,
-            kernel_initializer='he_uniform',
-            name='dense_layer_2',
+            name='dense_layer_node_1',
         )
-        self.dense_layer_3 = Dense(
+        self.dense_layer_node_2 = Dense(
+            layer_sizes[1],
+            activation=None,
+            kernel_initializer='he_uniform',
+            name='dense_layer_node_2',
+        )
+
+        self.dense_layer_global_1 = Dense(
+            layer_sizes[2],
+            activation=None,
+            kernel_initializer='he_uniform',
+            name='dense_layer_global_1',
+        )
+        self.dense_layer_global_2 = Dense(
+            layer_sizes[3],
+            activation=None,
+            kernel_initializer='he_uniform',
+            name='dense_layer_global_2',
+        )
+
+        self.dense_layer_global_3 = Dense(
             1,
-            name='dense_layer_3'
+            name='dense_layer_global_3'
         )
 
         self.relu_layer = ReLU(negative_slope=0.01)
-        self.embedding_layer_node_ops = Embedding(121, 32, input_length=mask_max_len)
+        self.embedding_layer_node_ops = Embedding(
+            121, node_embedding_size, input_length=mask_max_len)
 
         self.text_vectorization = tf.keras.layers.TextVectorization(
             standardize=None,
@@ -260,14 +291,14 @@ class LayoutMLP(MLP):
 
         lr_schedule = tf.keras.optimizers.schedules.ExponentialDecay(
             initial_learning_rate=learning_rate,
-            decay_steps=20_000,
-            decay_rate=0.9,
+            decay_steps=10_000,
+            decay_rate=decay_rate,
             staircase=True)
 
         self.optimizer = tf.keras.optimizers.Adam(learning_rate=lr_schedule)
         self.loss_computer = tfr.keras.losses.PairwiseHingeLoss()
 
-        self.max_validations_without_improvement = 100
+        self.max_validations_without_improvement = validations_without_improvement
 
     @tf.function
     def train_step(self, batch: dict[str, tf.Tensor]):
@@ -280,8 +311,8 @@ class LayoutMLP(MLP):
             )
 
             loss_value = loss_value \
-                         + tf.keras.regularizers.L1(l1=1e-7)(self.dense_layer_1.kernel) \
-                         + tf.keras.regularizers.L1(l1=1e-7)(self.dense_layer_2.kernel)
+                         + tf.keras.regularizers.L1(l1=1e-7)(self.dense_layer_node_1.kernel) \
+                         + tf.keras.regularizers.L1(l1=1e-7)(self.dense_layer_global_1.kernel)
 
         gradients = tape.gradient(loss_value, self.trainable_variables)
         self.optimizer.apply_gradients(zip(gradients, self.trainable_variables))
@@ -314,7 +345,10 @@ class LayoutMLP(MLP):
         normal_graph_descriptor = self.normalization_layer_graph_descriptor(graph_descriptor)
 
         x = tf.concat([x, node_embedding], axis=-1)
-        x = self.dense_layer_1(x)
+
+        x = self.dense_layer_node_1(x)
+        x = self.relu_layer(x)  # (batch_size, n_config_nodes_upper_limit, n_units)
+        x = self.dense_layer_node_2(x)
         x = self.relu_layer(x)  # (batch_size, n_config_nodes_upper_limit, n_units)
 
         float_mask = tf.sequence_mask(valid_mask, self.mask_max_len, dtype=tf.float32)
@@ -322,12 +356,16 @@ class LayoutMLP(MLP):
 
         float_mask = tf.expand_dims(float_mask, axis=-1)
         x = x * float_mask
-        x = tf.reduce_mean(x, axis=1)
+
+        x = tf.reduce_sum(x, axis=1)
+        x = x / tf.expand_dims(tf.cast(valid_mask, tf.float32), axis=-1)
 
         x = tf.concat([x, normal_graph_descriptor, subset_info], axis=-1)
-        x = self.dense_layer_2(x)
+        x = self.dense_layer_global_1(x)
         x = self.relu_layer(x)
-        x = self.dense_layer_3(x)
+        x = self.dense_layer_global_2(x)
+        x = self.relu_layer(x)
+        x = self.dense_layer_global_3(x)
         x = tf.reshape(x, (-1,))
         return x
 
