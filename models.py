@@ -234,7 +234,9 @@ class LayoutMLP(MLP):
             layer_sizes: List[int],
             decay_rate: float,
             validations_without_improvement: int,
-            node_embedding_size: int
+            node_embedding_size: int,
+            loss: str,
+            l1_multiplier: float
     ):
         super().__init__(batch_size, validation_frequency=validation_frequency)
         self.mask_max_len = mask_max_len
@@ -296,8 +298,14 @@ class LayoutMLP(MLP):
             staircase=True)
 
         self.optimizer = tf.keras.optimizers.Adam(learning_rate=lr_schedule)
-        self.loss_computer = tfr.keras.losses.PairwiseHingeLoss()
+        if loss == 'pairwise_hinge':
+            self.loss_computer = tfr.keras.losses.PairwiseHingeLoss()
+        elif loss == 'list_mle':
+            self.loss_computer = tfr.keras.losses.ListMLELoss()
+        else:
+            raise ValueError(f'{loss} is not a valid loss')
 
+        self.l1_multiplier = l1_multiplier
         self.max_validations_without_improvement = validations_without_improvement
 
     @tf.function
@@ -311,8 +319,10 @@ class LayoutMLP(MLP):
             )
 
             loss_value = loss_value \
-                         + tf.keras.regularizers.L1(l1=1e-7)(self.dense_layer_node_1.kernel) \
-                         + tf.keras.regularizers.L1(l1=1e-7)(self.dense_layer_global_1.kernel)
+                         + tf.keras.regularizers.L1(l1=self.l1_multiplier)(self.dense_layer_node_1.kernel) \
+                         + tf.keras.regularizers.L1(l1=self.l1_multiplier)(self.dense_layer_node_2.kernel) \
+                         + tf.keras.regularizers.L1(l1=self.l1_multiplier)(self.dense_layer_global_1.kernel) \
+                         + tf.keras.regularizers.L1(l1=self.l1_multiplier)(self.dense_layer_global_2.kernel)
 
         gradients = tape.gradient(loss_value, self.trainable_variables)
         self.optimizer.apply_gradients(zip(gradients, self.trainable_variables))

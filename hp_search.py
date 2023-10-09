@@ -13,6 +13,8 @@ def training_function(config: dict):
     batch_per_file_size = config['batch_per_file_size']
     decay_rate = config['decay_rate']
     node_embedding_size = config['node_embedding_size']
+    loss = config['loss']
+    l1_multiplier = config['l1_multiplier']
     dataset = LayoutDataset(
         batch_size, train_sample_fraction=1.0,
         subset=None, build_tfrecords=False,
@@ -28,7 +30,9 @@ def training_function(config: dict):
         node_embedding_size=node_embedding_size,
         validation_frequency=15_000,
         validations_without_improvement=3,
-        layer_sizes=[config[f'layer_{i}'] for i in range(4)]
+        layer_sizes=[config[f'layer_{i}'] for i in range(4)],
+        loss=loss,
+        l1_multiplier=l1_multiplier
     )
     mlp.train(
         dataset,
@@ -43,15 +47,17 @@ if __name__ == '__main__':
         time_attr="iterations", grace_period=40_000, max_t=600_000)
 
     hp_config = {
-        "batch_size": tune.choice([64, 128, 256]),
-        "learning_rate": tune.loguniform(1e-5, 1e-2),
+        "batch_size": 128,
+        "learning_rate": tune.loguniform(5e-5, 5e-3),
         "batch_per_file_size": tune.choice([2, 4, 8, 16]),
-        "decay_rate": tune.uniform(0.8, 0.99),
+        "decay_rate": tune.uniform(0.9, 0.99),
         "node_embedding_size": tune.lograndint(8, 64),
-        'layer_0': tune.lograndint(32, 256),
-        'layer_1': tune.lograndint(32, 256),
-        'layer_2': tune.lograndint(32, 256),
-        'layer_3': tune.lograndint(16, 128),
+        'layer_0': tune.lograndint(64, 256),
+        'layer_1': tune.lograndint(64, 256),
+        'layer_2': tune.lograndint(64, 256),
+        'layer_3': tune.lograndint(32, 128),
+        'loss': tune.choice(['pairwise_hinge', 'list_mle']),
+        'l1_multiplier': tune.loguniform(1e-9, 1e-6)
     }
 
     trainable_with_cpu_gpu = tune.with_resources(
