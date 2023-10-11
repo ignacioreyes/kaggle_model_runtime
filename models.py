@@ -8,11 +8,11 @@ from tensorflow.keras.layers import ReLU
 from tensorflow.keras.layers import Embedding
 import tensorflow_ranking as tfr
 from scipy.stats import kendalltau
-from abc import abstractmethod
+from abc import abstractmethod, ABC
 from typing import List
 
 
-class MLP(Model):
+class MLP(Model, ABC):
     def __init__(self, batch_size: int, validation_frequency: int):
         super().__init__()
         self.batch_size = batch_size
@@ -25,24 +25,6 @@ class MLP(Model):
     @abstractmethod
     def unpack_batch_with_labels(self, batch: tuple[tf.Tensor, ...]):
         pass
-
-    @tf.function
-    def train_step(self, batch: dict[str, tf.Tensor]):
-        call_input, target = self.unpack_batch_with_labels(batch)
-        with tf.GradientTape() as tape:
-            y_pred = self.__call__(call_input)
-            loss_value_true_labels = self.loss_computer_true_labels(target, y_pred)
-
-            # TODO: remember that the goal is to find the top-k, so some samples
-            # are more important than others
-            loss_value = loss_value_true_labels \
-                         + tf.keras.regularizers.L1(l1=1e-6)(self.dense_layer_1.kernel) \
-                         + tf.keras.regularizers.L1(l1=1e-6)(self.dense_layer_2.kernel)
-
-        gradients = tape.gradient(loss_value, self.trainable_variables)
-        self.optimizer.apply_gradients(zip(gradients, self.trainable_variables))
-
-        return loss_value
 
     @abstractmethod
     def inference_from_batch(self, batch: tuple[tf.Tensor]) -> tf.Tensor:
@@ -60,7 +42,7 @@ class MLP(Model):
                 label = batch['target'].numpy()
                 labels.append(label)
             predictions.append(y_pred.numpy())
-            id_list.append(batch['layout_id'].numpy())
+            id_list.append(batch[self.id_key].numpy())
             config_index_list.append(batch['config_index'].numpy())
 
         predictions = np.concatenate(predictions, axis=0)
@@ -108,7 +90,7 @@ class MLP(Model):
             for batch in training_dataset:
                 training_loss = self.train_step(batch)
                 iteration += 1
-                if iteration % 100 == 0:
+                if iteration % 500 == 0:
                     # TODO: use tensorboard -> tune learning rate
                     print(
                         'iteration', iteration,
@@ -152,12 +134,20 @@ class MLP(Model):
 
 
 class TileMLP(MLP):
-    def unpack_batch_with_labels(self, batch: tuple[tf.Tensor, ...]):
-        tile_ids, config_indexes, config_descriptors, normalized_runtimes = batch
+    def unpack_batch_with_labels(self, batch: dict[str, tf.Tensor]):
+        config_descriptors = batch['config_descriptor']
+        normalized_runtimes = batch['target']
         return config_descriptors, normalized_runtimes
 
-    def __init__(self, batch_size: int, learning_rate: float):
+    def __init__(
+            self,
+            batch_size: int,
+            learning_rate: float,
+            batch_per_file_size: int
+    ):
         super().__init__(batch_size, validation_frequency=10_000)
+        self.id_key = 'tile_id'
+        self.batch_per_file_size = batch_per_file_size
         self.normalization_layer = Normalization(axis=-1)
         self.dense_layer_1 = Dense(
             100,
@@ -166,7 +156,7 @@ class TileMLP(MLP):
             name='dense_layer_1',
         )
         self.dense_layer_2 = Dense(
-            10,
+            30,
             activation=None,
             kernel_initializer='he_uniform',
             name='dense_layer_2',
@@ -180,14 +170,14 @@ class TileMLP(MLP):
 
         lr_schedule = tf.keras.optimizers.schedules.ExponentialDecay(
             initial_learning_rate=learning_rate,
-            decay_steps=1_000,
+            decay_steps=5_000,
             decay_rate=0.9,
             staircase=True)
 
         self.optimizer = tf.keras.optimizers.Adam(learning_rate=lr_schedule)
-        self.loss_computer_true_labels = tf.keras.losses.MeanSquaredError()
+        self.loss_computer = tfr.keras.losses.PairwiseHingeLoss()
 
-        self.max_validations_without_improvement = 2
+        self.max_validations_without_improvement = 3
 
     def call(self, x):
         x = self.normalization_layer(x)
@@ -199,28 +189,47 @@ class TileMLP(MLP):
         x = tf.reshape(x, (-1,))
         return x
 
-    def inference_from_batch(self, batch: tuple[tf.Tensor]) -> tf.Tensor:
-        tile_ids, config_indexes, config_descriptors = batch[:3]
-        prediction = self.__call__(config_descriptors)  # TODO: call with @tf.function
+    @tf.function
+    def train_step(self, batch: dict[str, tf.Tensor]):
+        call_input, target = self.unpack_batch_with_labels(batch)
+        with tf.GradientTape() as tape:
+            y_pred = self.__call__(call_input)
+            loss_value = self.loss_computer(
+                tf.reshape(target, (-1, self.batch_per_file_size)),
+                tf.reshape(y_pred, (-1, self.batch_per_file_size))
+            )
+
+        gradients = tape.gradient(loss_value, self.trainable_variables)
+        self.optimizer.apply_gradients(zip(gradients, self.trainable_variables))
+
+        return loss_value
+
+    @tf.function
+    def inference_from_batch(self, batch: dict[str, tf.Tensor]) -> tf.Tensor:
+        config_descriptor = batch['config_descriptor']
+        prediction = self.__call__(config_descriptor)
         return prediction
 
     def compute_validation_loss(self, validation_df: pd.DataFrame) -> float:
-        predictions = validation_df['prediction']
-        targets = validation_df['target']
-        validation_score = float(np.mean(np.square(predictions - targets)))
-        validation_loss = validation_score
-        return validation_loss
+        def metric_per_id(df):
+            top = df.sort_values('prediction').iloc[:5]
+            best_attempt = np.min(top['target'])
+            best_target = np.min(df['target'])
+            return 2 - np.exp(best_attempt - best_target)
+
+        metrics = validation_df.groupby('ID').apply(metric_per_id)
+        return -np.mean(metrics)
 
     def fit_normalizations(self, dataset):
         config_desc_list = []
         for i, batch in enumerate(dataset):
-            tile_ids, config_indexes, config_descriptors, normalized_runtimes = batch
-            config_desc_list.append(config_descriptors)
+            config_descriptor = batch['config_descriptor']
+            config_desc_list.append(config_descriptor)
             if i == 100:
                 break
 
         config_desc_list = np.concatenate(config_desc_list, axis=0)
-        self.normalization_layer_config_nodes.adapt(config_desc_list)
+        self.normalization_layer.adapt(config_desc_list)
 
 
 class LayoutMLP(MLP):
@@ -239,6 +248,7 @@ class LayoutMLP(MLP):
             l1_multiplier: float
     ):
         super().__init__(batch_size, validation_frequency=validation_frequency)
+        self.id_key = 'layout_id'
         self.mask_max_len = mask_max_len
         self.batch_per_file_size = batch_per_file_size
         self.normalization_layer_config_nodes = Normalization(axis=-1)
