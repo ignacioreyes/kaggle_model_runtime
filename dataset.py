@@ -17,74 +17,171 @@ magic_log_v = np.vectorize(magic_log)
 
 
 class TileDataset:
-    def __init__(self, batch_size: int):
+    def __init__(
+            self,
+            batch_size: int,
+            batch_per_file_size: int,
+            build_tfrecords: bool):
+
         self.root_dir = 'predict-ai-model-runtime/npz_all/npz/tile/xla'
+        self.tfrecords_dir = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)),
+            'tile_tfrecords')
         self.batch_size = batch_size
+        self.batch_per_file_size = batch_per_file_size
+
+        if build_tfrecords:
+            self.create_tfrecords('train')
+            self.create_tfrecords('test')
+            self.create_tfrecords('valid')
+
         with tf.device('/cpu:0'):
-            self.train_data = self._load_set('train')
-            self.valid_data = self._load_set('valid')
-            self.test_data = self._load_set('test')
+            self.train_data = self.load_tfrecords('train')
+            self.valid_data = self.load_tfrecords('valid')
+            self.test_data = self.load_tfrecords('test')
 
-    def _load_set(self, set_name: str) -> tf.data.Dataset:
-        set_dir = os.path.join(self.root_dir, set_name)
-        tile_ids = []
-        config_indexes = []
-        config_descriptors = []
-        normalized_runtimes = []
+    def create_tfrecords(self, set_name: str) -> None:
+        filenames_list = self._list_filenames(set_name)
+        if not os.path.exists(self.tfrecords_dir):
+            os.mkdir(self.tfrecords_dir)
+        self.write_tfrecords(
+            filenames_list, set_name, self.tfrecords_dir)
 
-        for filename in tqdm(os.listdir(set_dir), desc=f'loading {set_name}'):
-            tile_id = 'tile:xla:' + filename[:-len('.npz')]
-            tile_dict = dict(np.load(os.path.join(set_dir, filename)))
-            tile_dict['ID'] = tile_id
+    def write_tfrecords(
+            self,
+            filenames: List[str],
+            set_name: str,
+            output_folder: str):
+
+        for filename in tqdm(filenames, desc=f'loading {set_name}'):
+            tile_dict = dict(np.load(filename))
+
+            filename_split = filename.split('/')
+            filename = filename_split[-1][:-len('.npz')]
+            tile_id = f'tile:xla:{filename}'
+
+            output_filename = os.path.join(
+                output_folder,
+                tile_id + f':{set_name}.tfrecords')
+
+            n_configs = len(tile_dict['config_feat'])
+            target = -100.0 * np.ones(n_configs)
             if set_name != 'test':
                 target = tile_dict['config_runtime'] / tile_dict['config_runtime_normalizers']
                 target = np.log(target)
-                tile_dict['normalized_runtime'] = target
+            # target.shape == (n_configs,)
 
-            for config_idx in range(len(tile_dict['config_feat'])):
-                config_descriptor = tile_dict['config_feat'][config_idx].astype(np.float32)
-                if set_name != 'test':
-                    normalized_runtime = tile_dict['normalized_runtime'][config_idx].astype(np.float32)
-                    normalized_runtimes.append(normalized_runtime)
+            config_descriptor = tile_dict['config_feat']
+            # config_descriptor.shape == (n_configs, 24)
 
-                tile_ids.append(tile_id)
-                config_indexes.append(config_idx)
-                config_descriptors.append(config_descriptor)
+            new_order = np.random.permutation(np.arange(n_configs))
+            target = target[new_order]
+            config_descriptor = config_descriptor[new_order]
 
-        tile_ids = np.array(tile_ids)
-        config_indexes = np.array(config_indexes, dtype=np.int32)
-        config_descriptors = np.stack(config_descriptors, axis=0)
-        normalized_runtimes = np.array(normalized_runtimes)
+            with tf.io.TFRecordWriter(
+                    output_filename,
+                    options=tf.io.TFRecordOptions(compression_type='GZIP')) as file_writer:
+
+                layout_feature = tf.train.Feature(
+                    bytes_list=tf.train.BytesList(value=[tile_id.encode('UTF-8')]))
+
+                for i_sample in range(n_configs):
+                    config_descriptor_serialized = tf.io.serialize_tensor(
+                        config_descriptor[i_sample]).numpy()
+
+                    record_bytes = tf.train.Example(
+                        features=tf.train.Features(
+                            feature={
+                                'tile_id': layout_feature,
+                                'config_index': tf.train.Feature(
+                                    int64_list=tf.train.Int64List(value=[new_order[i_sample]])),
+                                'config_descriptor': tf.train.Feature(
+                                    bytes_list=tf.train.BytesList(value=[config_descriptor_serialized])),
+                                'target': tf.train.Feature(
+                                    float_list=tf.train.FloatList(value=[target[i_sample]]))
+                            }
+                        )
+                    )
+                    file_writer.write(record_bytes.SerializeToString())
+
+    @staticmethod
+    def tfrecord_decoder(record_bytes):
+        parsed_example = tf.io.parse_single_example(
+            record_bytes,
+
+            # schema
+            {'tile_id': tf.io.FixedLenFeature([], dtype=tf.string),
+             'config_index': tf.io.FixedLenFeature([], dtype=tf.int64),
+             'config_descriptor': tf.io.FixedLenFeature([], dtype=tf.string),
+             'target': tf.io.FixedLenFeature([], dtype=tf.float32)
+             }
+        )
+        parsed_example['config_descriptor'] = tf.io.parse_tensor(
+            parsed_example['config_descriptor'], tf.float32
+        )
+        return parsed_example
+
+    def _list_filenames(self, set_name: str) -> List[str]:
+        filenames_list = []
+        for dirpath, dirnames, filenames in os.walk(self.root_dir):
+            if len(filenames) == 0:
+                continue
+            dirpath_split = dirpath.split('/')
+            current_set = dirpath_split[-1]
+            if current_set != set_name:
+                continue
+
+            for filename in filenames:
+                full_filename = os.path.join(dirpath, filename)
+                filenames_list.append(full_filename)
+
+        return filenames_list
+
+    def load_tfrecords(self, set_name: str) -> tf.data.Dataset:
+        assert set_name in ('train', 'valid', 'test')
+
+        tfrecords_file_list = os.listdir(self.tfrecords_dir)
+        filenames = []
+
+        for filename in tfrecords_file_list:
+            f = filename[:-(len('.tfrecords'))].split(':')
+            if f[-1] != set_name:
+                continue
+
+            filenames.append(
+                os.path.join(self.tfrecords_dir, filename))
+
+        random.shuffle(filenames)  # inplace
+        dataset = tf.data.Dataset.from_tensor_slices(filenames)
+
+        def interleave_fn(filename: str) -> tf.data.Dataset:
+            dataset = tf.data.TFRecordDataset(
+                filename, compression_type='GZIP')
+            dataset = dataset.map(
+                self.tfrecord_decoder, num_parallel_calls=tf.data.AUTOTUNE)
+            dataset = dataset.shuffle(buffer_size=20)
+            if set_name == 'train':
+                dataset = dataset.batch(
+                    self.batch_per_file_size, drop_remainder=True)
+            return dataset
+
+        dataset = dataset.interleave(
+            interleave_fn,
+            cycle_length=20,
+            block_length=1,
+            num_parallel_calls=tf.data.AUTOTUNE,
+            deterministic=False)
 
         if set_name == 'train':
-            train_len = len(tile_ids)
-            print(f'permutating {train_len} training samples')
-
-            new_order = np.random.permutation(np.arange(train_len))
-
-            tile_ids = [tile_ids[i] for i in new_order]
-            config_indexes = config_indexes[new_order]
-            config_descriptors = config_descriptors[new_order]
-            normalized_runtimes = normalized_runtimes[new_order]
-
-            print('creating training tf.data.Dataset')
-            tf_dataset = tf.data.Dataset.from_tensor_slices(
-                (tile_ids, config_indexes, config_descriptors, normalized_runtimes))
-            tf_dataset = tf_dataset.shuffle(buffer_size=1_000).batch(self.batch_size)
-
-        elif set_name == 'valid':
-            print('creating validation tf.data.Dataset')
-            tf_dataset = tf.data.Dataset.from_tensor_slices(
-                (tile_ids, config_indexes, config_descriptors, normalized_runtimes))
-            tf_dataset = tf_dataset.batch(self.batch_size)
-
+            batch_size = (self.batch_size // self.batch_per_file_size) * self.batch_per_file_size
+            batch_size = int(batch_size)
+            dataset = dataset.rebatch(batch_size)
         else:
-            print('creating test tf.data.Dataset')
-            tf_dataset = tf.data.Dataset.from_tensor_slices(
-                (tile_ids, config_indexes, config_descriptors))
-            tf_dataset = tf_dataset.batch(self.batch_size)
+            dataset = dataset.batch(self.batch_size)
 
-        return tf_dataset
+        final_dataset = dataset.prefetch(10)
+
+        return final_dataset
 
 
 class LayoutDataset:
@@ -403,14 +500,19 @@ class LayoutDataset:
 
 
 if __name__ == '__main__':
-    dataset = LayoutDataset(
+    # dataset = LayoutDataset(
+    #     batch_size=64,
+    #     train_sample_fraction=1.0,
+    #     subset=None,
+    #     build_tfrecords=False)
+
+    dataset = TileDataset(
         batch_size=64,
-        train_sample_fraction=1.0,
-        subset=None,
+        batch_per_file_size=8,
         build_tfrecords=False)
-    # dataset = TileDataset(batch_size=64)
 
     for i, sample in enumerate(dataset.train_data):
-        print(sample)
-        if i == 2:
+        print(np.unique(sample['tile_id'].numpy()))
+        if i == 10:
+            print(sample)
             break
