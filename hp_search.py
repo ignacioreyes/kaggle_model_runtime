@@ -56,12 +56,12 @@ if __name__ == '__main__':
         'layer_1': tune.lograndint(64, 256),
         'layer_2': tune.lograndint(64, 256),
         'layer_3': tune.lograndint(32, 128),
-        'loss': tune.choice(['pairwise_hinge', 'list_mle']),
-        'l1_multiplier': tune.loguniform(1e-9, 1e-6)
+        'loss': 'pairwise_hinge',  # tune.choice(['pairwise_hinge', 'list_mle']),
+        'l1_multiplier': tune.loguniform(1e-10, 5e-8)
     }
 
     trainable_with_cpu_gpu = tune.with_resources(
-        training_function, {"cpu": 14, "gpu": 1})
+        training_function, {"cpu": 16, "gpu": 1})
     tuner = tune.Tuner(
         trainable_with_cpu_gpu,
         tune_config=tune.TuneConfig(
