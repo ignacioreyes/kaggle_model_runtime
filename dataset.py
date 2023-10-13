@@ -4,7 +4,7 @@ from tqdm import tqdm
 import tensorflow as tf
 import random
 from collections import defaultdict
-from typing import List
+from typing import List, Optional, Tuple
 
 
 def magic_log(x):
@@ -14,6 +14,14 @@ def magic_log(x):
 
 
 magic_log_v = np.vectorize(magic_log)
+
+
+def compute_adjacency_matrix(edges: np.array, n_nodes: int) -> np.array:
+    adjacency_matrix = np.zeros((n_nodes, n_nodes), dtype=int)
+    for edge in edges:
+        edge_to, edge_from = edge
+        adjacency_matrix[edge_to, edge_from] += 1
+    return adjacency_matrix
 
 
 class TileDataset:
@@ -198,8 +206,8 @@ class LayoutDataset:
             os.path.dirname(os.path.abspath(__file__)),
             'layout_tfrecords')
         self.batch_size = batch_size
-        self.n_config_nodes_upper_limit = 500
-        max_configs_per_graph = 10_000  # None
+        self.n_config_nodes_upper_limit = 1_000
+        max_configs_per_graph = 50_000  # None
         self.batch_per_file_size = batch_per_file_size
         self.subset = subset  # {xla, nlp}
 
@@ -312,13 +320,6 @@ class LayoutDataset:
                 filenames_list.append(full_filename)
 
         return filenames_list
-
-    def compute_adjacency_matrix(self, edges: np.array, n_nodes: int) -> np.array:
-        adjacency_matrix = np.zeros((n_nodes, n_nodes), dtype=int)
-        for edge in edges:
-            edge_to, edge_from = edge
-            adjacency_matrix[edge_to, edge_from] += 1
-        return adjacency_matrix
 
     def compute_node_descriptors(
             self,
@@ -465,7 +466,7 @@ class LayoutDataset:
                 # target = np.stack([target, normalized_target], axis=-1)
                 target = np.log(target)
 
-            adjacency_matrix = self.compute_adjacency_matrix(
+            adjacency_matrix = compute_adjacency_matrix(
                 layout_dict['edge_index'], len(layout_dict['node_opcode']))
             graph_descriptor = self.compute_graph_descriptor(layout_dict['node_opcode'])
             node_config_feat, n_valid_nodes = self.compute_node_descriptors(
@@ -497,6 +498,129 @@ class LayoutDataset:
                         )
                     )
                     file_writer.write(record_bytes.SerializeToString())
+
+
+class Layout:
+    def __init__(self, full_filename: str, max_trials: Optional[int]):
+        layout_dict = dict(np.load(full_filename))
+
+        filename_split = full_filename.split('/')
+        filename_wo_ext = filename_split[-1][:-len('.npz')]
+        self.layout_id = f'layout:{filename_split[-4]}:{filename_split[-3]}:{filename_wo_ext}'
+
+        self.edge_index = layout_dict['edge_index']
+        # (n_edges, 2) to <- from
+
+        self.node_feat = layout_dict['node_feat']
+        # (n_nodes, 140)
+
+        self.node_opcode = layout_dict['node_opcode']
+        # (n_nodes,)
+
+        self.node_config_feat = layout_dict['node_config_feat']
+        # (n_trials, n_configurable_nodes, 18)
+
+        self.node_config_ids = layout_dict['node_config_ids']
+        # (n_configurable_nodes,)
+
+        self.node_splits = layout_dict['node_splits']
+        # ?
+
+        self.config_runtime = layout_dict['config_runtime']
+        # (n_trials,)
+
+        n_trials = len(self.config_runtime)
+
+        if max_trials is not None and n_trials > max_trials:
+            trial_sample = np.random.choice(np.arange(n_trials), max_trials)
+            self.node_config_feat = self.node_config_feat[trial_sample]
+            self.config_runtime = self.config_runtime[trial_sample]
+            n_trials = max_trials
+
+        self.n_trials = n_trials
+
+        self.config_runtime = np.log(self.config_runtime)
+        self.adjacency_matrix = compute_adjacency_matrix(
+            self.edge_index, n_nodes=len(self.node_opcode))
+
+        self.global_graph_description = self.compute_graph_description()
+
+    def compute_graph_description(self) -> np.ndarray:
+        nodes, counts = np.unique(self.node_opcode, return_counts=True)
+        descriptor = np.zeros(120, dtype=np.float32)
+        for n, c in zip(nodes, counts):
+            # n goes from 1 to 120, so we save it in n-1
+            descriptor[n-1] = c
+        n_nodes = np.sum(descriptor)
+        descriptor = descriptor / n_nodes
+        descriptor = np.concatenate([descriptor, np.array([np.log(n_nodes)])])
+        return descriptor
+
+    def compute_node_descriptors(
+            self,
+            trial_index: int,
+            max_nodes: Optional[int]) -> Tuple[np.ndarray, int]:
+
+        assert trial_index < self.n_trials
+        node_config_feat = self.node_config_feat[trial_index]
+        # (n_configurable_nodes, 18)
+
+        n_config_nodes = len(node_config_feat)
+        n_valid_nodes = min(n_config_nodes, max_nodes)
+        # TODO: finish refactoring
+        n_valid_nodes = np.array([n_valid_nodes] * n_trials, dtype=np.int32)
+        # n_valid_nodes.shape == (n_trials,)
+
+        if n_config_nodes > self.n_config_nodes_upper_limit:
+            selected_nodes = np.random.choice(
+                np.arange(n_config_nodes),
+                self.n_config_nodes_upper_limit)
+        else:
+            selected_nodes = np.arange(n_config_nodes)
+
+        node_config_feat = node_config_feat[:, selected_nodes, :]
+        node_config_feat = node_config_feat
+
+        interesting_node_features = np.concatenate([
+            np.arange(21, 27),  # shape dims
+            np.arange(31, 37),  # reshape/broadcast dims
+            np.arange(134, 140),  # phys layout
+            np.arange(95, 99),  # conv dims input
+            np.arange(101, 105)  # conv dims kernel
+        ], axis=0)
+        selected_nodes_global = layout_dict['node_config_ids'][selected_nodes]
+        node_features = layout_dict['node_feat']
+        parent_output_shapes = self.compute_parent_output_shapes(
+            adjacency_matrix, selected_nodes_global, node_features)
+
+        node_types = layout_dict['node_opcode'][selected_nodes_global]
+        node_types = tf.expand_dims(node_types, axis=1)
+
+        node_features_array = node_features[selected_nodes_global]
+        node_features_array = node_features_array[:, interesting_node_features]
+
+        node_features_array = node_features_array.astype(np.float32)
+        parent_output_shapes = parent_output_shapes.astype(np.float32)
+        node_config_feat = node_config_feat.astype(np.float32)
+
+        node_features_array = np.concatenate(
+            [node_features_array, parent_output_shapes, node_types], axis=1)
+        node_features_array = magic_log_v(node_features_array)
+        node_features_array = np.tile(node_features_array, (n_trials, 1, 1))
+
+        node_descriptors = np.concatenate(
+            [node_config_feat, node_features_array], axis=-1)
+
+        padding_size = max(self.n_config_nodes_upper_limit - n_config_nodes, 0)
+        if padding_size > 0:
+            node_descriptors = np.concatenate(
+                [node_descriptors,
+                 np.zeros(
+                     (n_trials, padding_size, node_descriptors.shape[2]),
+                     dtype=np.float32)],
+                axis=1)
+
+        return node_descriptors, n_valid_nodes
 
 
 if __name__ == '__main__':
