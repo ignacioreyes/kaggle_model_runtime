@@ -80,7 +80,8 @@ class MLP(Model, ABC):
 
         training_dataset = dataset.train_data
         validation_dataset = dataset.valid_data
-        self.fit_normalizations(training_dataset)
+        with tf.device('/cpu:0'):
+            self.fit_normalizations(training_dataset)
 
         iteration = 0
         epoch = 0
@@ -252,7 +253,6 @@ class LayoutMLP(MLP):
         self.mask_max_len = mask_max_len
         self.batch_per_file_size = batch_per_file_size
         self.normalization_layer_config_nodes = Normalization(axis=-1)
-        self.normalization_layer_graph_descriptor = Normalization(axis=-1)
         self.dense_layer_node_1 = Dense(
             layer_sizes[0],
             activation=None,
@@ -362,7 +362,6 @@ class LayoutMLP(MLP):
         # node_embedding.shape == (batch_size, mask_max_len, embed_len)
 
         x = self.normalization_layer_config_nodes(config_descriptor)
-        normal_graph_descriptor = self.normalization_layer_graph_descriptor(graph_descriptor)
 
         x = tf.concat([x, node_embedding], axis=-1)
 
@@ -380,7 +379,7 @@ class LayoutMLP(MLP):
         x = tf.reduce_sum(x, axis=1)
         x = x / tf.expand_dims(tf.cast(valid_mask, tf.float32), axis=-1)
 
-        x = tf.concat([x, normal_graph_descriptor, subset_info], axis=-1)
+        x = tf.concat([x, graph_descriptor, subset_info], axis=-1)
         x = self.dense_layer_global_1(x)
         x = self.relu_layer(x)
         x = self.dense_layer_global_2(x)
@@ -439,18 +438,12 @@ class LayoutMLP(MLP):
 
     def fit_normalizations(self, dataset):
         config_desc_list = []
-        graph_desc_list = []
         for i, batch in enumerate(dataset):
-            config_descriptors = batch['node_descriptor']
-            graph_descriptor = batch['graph_descriptor']
-
-            config_desc_list.append(config_descriptors[:, :, :-1])  # last feature is not used here (layer type)
-            graph_desc_list.append(graph_descriptor)
-            if i == 100:
+            if i % 500 == 0:
+                config_descriptors = batch['node_descriptor']
+                config_desc_list.append(config_descriptors[:, :, :-1])  # last feature is not used here (layer type)
+            if i > 5_000:
                 break
 
         config_desc_list = np.concatenate(config_desc_list, axis=0)
         self.normalization_layer_config_nodes.adapt(config_desc_list)
-
-        graph_desc_list = np.concatenate(graph_desc_list, axis=0)
-        self.normalization_layer_graph_descriptor.adapt(graph_desc_list)
