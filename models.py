@@ -246,13 +246,13 @@ class LayoutMLP(MLP):
             validations_without_improvement: int,
             node_embedding_size: int,
             loss: str,
-            l1_multiplier: float
+            l1_multiplier: float,
+            n_siblings: int
     ):
         super().__init__(batch_size, validation_frequency=validation_frequency)
         self.id_key = 'layout_id'
         self.mask_max_len = mask_max_len
         self.batch_per_file_size = batch_per_file_size
-        self.normalization_layer_config_nodes = Normalization(axis=-1)
         self.dense_layer_node_1 = Dense(
             layer_sizes[0],
             activation=None,
@@ -285,6 +285,7 @@ class LayoutMLP(MLP):
         )
 
         self.relu_layer = ReLU(negative_slope=0.01)
+        self.node_embedding_size = node_embedding_size
         self.embedding_layer_node_ops = Embedding(
             121, node_embedding_size, input_length=mask_max_len)
 
@@ -317,6 +318,7 @@ class LayoutMLP(MLP):
 
         self.l1_multiplier = l1_multiplier
         self.max_validations_without_improvement = validations_without_improvement
+        self.n_siblings = n_siblings
 
     @tf.function
     def train_step(self, batch: dict[str, tf.Tensor]):
@@ -342,26 +344,30 @@ class LayoutMLP(MLP):
     def call(self, x):
         layout_ids, config_descriptor, valid_mask, graph_descriptor = x
 
-        with tf.device('/cpu:0'):
-            subset_info = tf.map_fn(
-                lambda layout_id: tf.strings.reduce_join(
-                    tf.strings.split(layout_id, ":")[:3]),
-                layout_ids
-            )
+        # with tf.device('/cpu:0'):
+        #     subset_info = tf.map_fn(
+        #         lambda layout_id: tf.strings.reduce_join(
+        #             tf.strings.split(layout_id, ":")[:3]),
+        #         layout_ids
+        #     )
+        # 
+        # subset_info = self.text_vectorization(subset_info)
+        # subset_info = tf.expand_dims(subset_info, axis=-1)
+        # subset_info = self.embedding_layer_subset_info(subset_info)
+        # subset_info = subset_info[:, 0, :]
 
-        subset_info = self.text_vectorization(subset_info)
-        subset_info = tf.expand_dims(subset_info, axis=-1)
-        subset_info = self.embedding_layer_subset_info(subset_info)
-        subset_info = subset_info[:, 0, :]
-
-        node_operations = config_descriptor[:, :, -1]
-        config_descriptor = config_descriptor[:, :, :-1]
+        n_opcodes = 1 + 2 + self.n_siblings
+        node_operations = config_descriptor[:, :, -n_opcodes:]
+        config_descriptor = config_descriptor[:, :, :-n_opcodes]
         node_operations = tf.cast(node_operations, tf.int32)
-        # node_operations.shape == (batch_size, mask_max_len)
+        # node_operations.shape == (batch_size, mask_max_len, (1+2+self.n_siblings))
         node_embedding = self.embedding_layer_node_ops(node_operations)
-        # node_embedding.shape == (batch_size, mask_max_len, embed_len)
+        # node_embedding.shape == (batch_size, mask_max_len, (1+2+self.n_siblings), embed_len)
+        node_embedding = tf.reshape(
+            node_embedding,
+            (-1, self.mask_max_len, n_opcodes*self.node_embedding_size))
 
-        x = self.normalization_layer_config_nodes(config_descriptor)
+        x = (config_descriptor - self.mean) / self.std
 
         x = tf.concat([x, node_embedding], axis=-1)
 
@@ -379,7 +385,8 @@ class LayoutMLP(MLP):
         x = tf.reduce_sum(x, axis=1)
         x = x / tf.expand_dims(tf.cast(valid_mask, tf.float32), axis=-1)
 
-        x = tf.concat([x, graph_descriptor, subset_info], axis=-1)
+        # x = tf.concat([x, graph_descriptor, subset_info], axis=-1)
+        x = tf.concat([x, graph_descriptor], axis=-1)
         x = self.dense_layer_global_1(x)
         x = self.relu_layer(x)
         x = self.dense_layer_global_2(x)
@@ -439,11 +446,17 @@ class LayoutMLP(MLP):
     def fit_normalizations(self, dataset):
         config_desc_list = []
         for i, batch in enumerate(dataset):
-            if i % 500 == 0:
+            if i % 100 == 0:
                 config_descriptors = batch['node_descriptor']
-                config_desc_list.append(config_descriptors[:, :, :-1])  # last feature is not used here (layer type)
-            if i > 5_000:
+
+                # last features are not used here (opcodes)
+                config_desc_list.append(config_descriptors[:, :, :-(1+2+self.n_siblings)])
+            if i > 1_000:
                 break
 
         config_desc_list = np.concatenate(config_desc_list, axis=0)
-        self.normalization_layer_config_nodes.adapt(config_desc_list)
+        mean = np.mean(config_desc_list, axis=(0, 1))
+        std = np.std(config_desc_list, axis=(0, 1))
+        std = np.clip(std, 1.0, None)
+        self.mean = mean
+        self.std = std

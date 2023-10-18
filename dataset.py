@@ -209,23 +209,22 @@ class LayoutDataset:
         self.batch_size = batch_size
         self.n_config_nodes_upper_limit = 750
         max_trials_training = 15_000  # None
-        n_siblings = 3
+        self.n_siblings = 3
         self.batch_per_file_size = batch_per_file_size
         self.subset = subset  # {xla, nlp}
 
         if build_tfrecords:
             self.create_tfrecords(
                 'train',
-                overwrite=True,
-                n_siblings=n_siblings,
+                overwrite=False,
+                n_siblings=self.n_siblings,
                 sample_fraction=train_sample_fraction,
                 max_trials_per_graph=max_trials_training)
             self.create_tfrecords(
-                'test', overwrite=True, n_siblings=n_siblings)
+                'test', overwrite=False, n_siblings=self.n_siblings)
             self.create_tfrecords(
-                'valid', overwrite=True,
-                n_siblings=n_siblings, max_trials_per_graph=1_000)
-            exit()
+                'valid', overwrite=False,
+                n_siblings=self.n_siblings, max_trials_per_graph=1_000)
 
         with tf.device('/cpu:0'):
             self.train_data = self.load_tfrecords('train')
@@ -287,7 +286,7 @@ class LayoutDataset:
             final_dataset = datasets[0]
             final_dataset = final_dataset.batch(self.batch_size)
 
-        final_dataset = final_dataset.prefetch(10)
+        final_dataset = final_dataset.prefetch(5)
 
         return final_dataset
 
@@ -298,15 +297,15 @@ class LayoutDataset:
         def interleave_fn(filename: str) -> tf.data.Dataset:
             dataset = tf.data.TFRecordDataset(filename, compression_type='GZIP')
             dataset = dataset.map(self.tfrecord_decoder, num_parallel_calls=tf.data.AUTOTUNE)
-            dataset = dataset.shuffle(buffer_size=20)
+            dataset = dataset.shuffle(buffer_size=10)
             if set_name == 'train':
                 dataset = dataset.batch(self.batch_per_file_size, drop_remainder=True)
-            return dataset.prefetch(2)
+            return dataset
 
         dataset = dataset.interleave(
             interleave_fn,
-            cycle_length=20,
-            num_parallel_calls=16,
+            cycle_length=10,
+            num_parallel_calls=tf.data.AUTOTUNE,
             deterministic=False)
         return dataset
 
@@ -406,7 +405,7 @@ class LayoutDataset:
             # write_one_tfrecord(filename, n_siblings, max_trials)
             tasks.append(delayed(write_one_tfrecord)(filename, n_siblings, max_trials))
 
-        Parallel(n_jobs=6, verbose=11, backend='loky')(tasks)
+        Parallel(n_jobs=4, verbose=11, backend='loky')(tasks)
 
 
 class Layout:
