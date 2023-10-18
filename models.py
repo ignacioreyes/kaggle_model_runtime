@@ -429,6 +429,8 @@ class LayoutMLP(MLP):
         ]
         for subset in subsets:
             val_subset = validation_df[validation_df['subset'] == subset]
+            if len(val_subset) == 0:
+                continue
             mean = np.mean(val_subset.groupby('ID').apply(compute_layout_score_group))
             print(subset, mean)
             set_means.append(mean)

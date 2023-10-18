@@ -211,7 +211,6 @@ class LayoutDataset:
         max_trials_training = 15_000  # None
         self.n_siblings = 3
         self.batch_per_file_size = batch_per_file_size
-        self.subset = subset  # {xla, nlp}
 
         if build_tfrecords:
             self.create_tfrecords(
@@ -227,9 +226,9 @@ class LayoutDataset:
                 n_siblings=self.n_siblings, max_trials_per_graph=1_000)
 
         with tf.device('/cpu:0'):
-            self.train_data = self.load_tfrecords('train')
-            self.test_data = self.load_tfrecords('test')
-            self.valid_data = self.load_tfrecords('valid')
+            self.train_data = self.load_tfrecords('train', subset)
+            self.test_data = self.load_tfrecords('test', subset)
+            self.valid_data = self.load_tfrecords('valid', subset)
 
     @staticmethod
     def tfrecord_decoder(record_bytes):
@@ -250,8 +249,10 @@ class LayoutDataset:
         )
         return parsed_example
 
-    def load_tfrecords(self, set_name: str) -> tf.data.Dataset:
+    def load_tfrecords(self, set_name: str, subset: Optional[str]) -> tf.data.Dataset:
         assert set_name in ('train', 'valid', 'test')
+        if subset is not None:
+            return self.load_tfrecords_subset(set_name, subset)
 
         tfrecords_file_list = os.listdir(self.tfrecords_dir)
         filenames_dict = defaultdict(list)
@@ -261,8 +262,9 @@ class LayoutDataset:
             if f[-1] != set_name:
                 continue
 
+            file_subset = ':'.join(f[:3])
             if set_name == 'train':
-                key = ':'.join(f[:3])
+                key = file_subset
             else:
                 key = 'all_filenames'
             filenames_dict[key].append(
@@ -290,6 +292,44 @@ class LayoutDataset:
 
         return final_dataset
 
+    def load_tfrecords_subset(self, set_name: str, subset: str) -> tf.data.Dataset:
+        assert subset in (
+            'nlp:random',
+            'nlp:default',
+            'xla:random',
+            'xla:default'
+        )
+        tfrecords_file_list = os.listdir(self.tfrecords_dir)
+        filenames = []
+
+        for filename in tfrecords_file_list:
+            f = filename[:-(len('.tfrecords'))].split(':')
+
+            file_set_name = f[-1]
+            if file_set_name != set_name:
+                continue
+
+            file_subset = ':'.join(f[1:3])
+            if file_subset != subset:
+                continue
+
+            filenames.append(
+                os.path.join(self.tfrecords_dir, filename))
+
+        random.shuffle(filenames)
+        dataset = self.build_dataset_from_filenames(filenames, set_name)
+
+        if set_name == 'train':
+            batch_size = (self.batch_size // self.batch_per_file_size) * self.batch_per_file_size
+            batch_size = int(batch_size)
+            dataset = dataset.rebatch(batch_size)
+        else:
+            dataset = dataset.batch(self.batch_size)
+
+        dataset = dataset.prefetch(5)
+
+        return dataset
+
     def build_dataset_from_filenames(self, filenames: List[str], set_name: str) -> tf.data.Dataset:
         assert set_name in ('train', 'valid', 'test')
         dataset = tf.data.Dataset.from_tensor_slices(filenames)
@@ -300,12 +340,12 @@ class LayoutDataset:
             dataset = dataset.shuffle(buffer_size=10)
             if set_name == 'train':
                 dataset = dataset.batch(self.batch_per_file_size, drop_remainder=True)
-            return dataset
+            return dataset.prefetch(2)
 
         dataset = dataset.interleave(
             interleave_fn,
-            cycle_length=10,
-            num_parallel_calls=tf.data.AUTOTUNE,
+            cycle_length=20,
+            num_parallel_calls=20,
             deterministic=False)
         return dataset
 
@@ -318,10 +358,6 @@ class LayoutDataset:
             current_set = dirpath_split[-1]
             if current_set != set_name:
                 continue
-            if self.subset is not None:
-                if dirpath_split[-3] != self.subset:
-                    continue
-                print(dirpath_split)
 
             for filename in filenames:
                 full_filename = os.path.join(dirpath, filename)
@@ -650,8 +686,8 @@ if __name__ == '__main__':
     dataset = LayoutDataset(
         batch_size=64,
         train_sample_fraction=1.0,
-        subset=None,
-        build_tfrecords=True,
+        subset='xla:default',
+        build_tfrecords=False,
         batch_per_file_size=8
     )
 
