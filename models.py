@@ -6,6 +6,7 @@ from tensorflow.keras.layers import Dense
 from tensorflow.keras.layers import Normalization
 from tensorflow.keras.layers import ReLU
 from tensorflow.keras.layers import Embedding
+from tensorflow.keras.layers import Dropout
 import tensorflow_ranking as tfr
 from scipy.stats import kendalltau
 from abc import abstractmethod, ABC
@@ -253,12 +254,22 @@ class LayoutMLP(MLP):
         self.id_key = 'layout_id'
         self.mask_max_len = mask_max_len
         self.batch_per_file_size = batch_per_file_size
-        self.dense_layer_node_1 = Dense(
-            layer_sizes[0],
-            activation=None,
-            kernel_initializer='he_uniform',
-            name='dense_layer_node_1',
+        self.k = 8
+        self.e = 32
+        self.v = layer_sizes[0]
+        self.q_layer = Dense(
+            self.k * self.e,
+            name='q_layer',
         )
+        self.k_layer = Dense(
+            self.k * self.e,
+            name='k_layer',
+        )
+        self.v_layer = Dense(
+            self.k * self.v,
+            name='v_layer',
+        )
+        self.charlie_dropout = Dropout(0.1)
         self.dense_layer_node_2 = Dense(
             layer_sizes[1],
             activation=None,
@@ -281,7 +292,8 @@ class LayoutMLP(MLP):
 
         self.dense_layer_global_3 = Dense(
             1,
-            name='dense_layer_global_3'
+            name='dense_layer_global_3',
+            use_bias=False
         )
 
         self.relu_layer = ReLU(negative_slope=0.01)
@@ -302,13 +314,23 @@ class LayoutMLP(MLP):
         )
         self.embedding_layer_subset_info = Embedding(6, 6, input_length=1)
 
-        lr_schedule = tf.keras.optimizers.schedules.ExponentialDecay(
-            initial_learning_rate=learning_rate,
-            decay_steps=10_000,
-            decay_rate=decay_rate,
-            staircase=True)
+        # lr_schedule = tf.keras.optimizers.schedules.ExponentialDecay(
+        #     initial_learning_rate=learning_rate,
+        #     decay_steps=10_000,
+        #     decay_rate=decay_rate,
+        #     staircase=True)
+        lr_schedule = tf.keras.optimizers.schedules.CosineDecay(
+            initial_learning_rate=0.0,
+            decay_steps=150000,
+            warmup_target=learning_rate,
+            warmup_steps=5000,
+            alpha=1e-2
+        )
 
-        self.optimizer = tf.keras.optimizers.Adam(learning_rate=lr_schedule)
+        self.optimizer = tf.keras.optimizers.Adam(
+            learning_rate=lr_schedule,
+            clipnorm=1.0
+        )
         if loss == 'pairwise_hinge':
             self.loss_computer = tfr.keras.losses.PairwiseHingeLoss()
         elif loss == 'list_mle':
@@ -324,14 +346,19 @@ class LayoutMLP(MLP):
     def train_step(self, batch: dict[str, tf.Tensor]):
         call_input, targets = self.unpack_batch_with_labels(batch)
         with tf.GradientTape() as tape:
-            y_pred = self.__call__(call_input)
+            y_pred = self.__call__(call_input, training=True)
             loss_value = self.loss_computer(
                 tf.reshape(targets, (-1, self.batch_per_file_size)),
                 tf.reshape(y_pred, (-1, self.batch_per_file_size))
             )
 
+            #abs_error = tf.math.abs(targets - y_pred)
+            #abs_error = tf.reduce_mean(tf.clip_by_value(abs_error, clip_value_min=0, clip_value_max=5))
+
             loss_value = loss_value \
-                         + tf.keras.regularizers.L1(l1=self.l1_multiplier)(self.dense_layer_node_1.kernel) \
+                             + tf.keras.regularizers.L1(l1=10*self.l1_multiplier)(self.q_layer.kernel) \
+                         + tf.keras.regularizers.L1(l1=10*self.l1_multiplier)(self.k_layer.kernel) \
+                         + tf.keras.regularizers.L1(l1=self.l1_multiplier)(self.v_layer.kernel) \
                          + tf.keras.regularizers.L1(l1=self.l1_multiplier)(self.dense_layer_node_2.kernel) \
                          + tf.keras.regularizers.L1(l1=self.l1_multiplier)(self.dense_layer_global_1.kernel) \
                          + tf.keras.regularizers.L1(l1=self.l1_multiplier)(self.dense_layer_global_2.kernel)
@@ -341,20 +368,20 @@ class LayoutMLP(MLP):
 
         return loss_value
 
-    def call(self, x):
+    def call(self, x, training=False):
         layout_ids, config_descriptor, valid_mask, graph_descriptor = x
 
-        # with tf.device('/cpu:0'):
-        #     subset_info = tf.map_fn(
-        #         lambda layout_id: tf.strings.reduce_join(
-        #             tf.strings.split(layout_id, ":")[:3]),
-        #         layout_ids
-        #     )
-        # 
-        # subset_info = self.text_vectorization(subset_info)
-        # subset_info = tf.expand_dims(subset_info, axis=-1)
-        # subset_info = self.embedding_layer_subset_info(subset_info)
-        # subset_info = subset_info[:, 0, :]
+        with tf.device('/cpu:0'):
+            subset_info = tf.map_fn(
+                lambda layout_id: tf.strings.reduce_join(
+                    tf.strings.split(layout_id, ":")[:3]),
+                layout_ids
+            )
+
+        subset_info = self.text_vectorization(subset_info)
+        subset_info = tf.expand_dims(subset_info, axis=-1)
+        subset_info = self.embedding_layer_subset_info(subset_info)
+        subset_info = subset_info[:, 0, :]
 
         n_opcodes = 1 + 2 + self.n_siblings
         node_operations = config_descriptor[:, :, -n_opcodes:]
@@ -371,8 +398,27 @@ class LayoutMLP(MLP):
 
         x = tf.concat([x, node_embedding], axis=-1)
 
-        x = self.dense_layer_node_1(x)
-        x = self.relu_layer(x)  # (batch_size, n_config_nodes_upper_limit, n_units)
+        # charlie puth
+        n = tf.shape(x)[1]
+        q_tensor = self.q_layer(x)
+        q_tensor = tf.reshape(q_tensor, (-1, n, self.k, self.e))
+
+        k_tensor = self.k_layer(x)
+        k_tensor = tf.reshape(k_tensor, (-1, n, self.k, self.e))
+
+        m_tensor = tf.reduce_sum(q_tensor*k_tensor, axis=3)
+        s_tensor = tf.nn.softmax(m_tensor/np.sqrt(self.e), axis=-1)
+        s_tensor = self.charlie_dropout(s_tensor, training=training)
+
+        v_tensor = self.v_layer(x)
+        v_tensor = tf.reshape(v_tensor, (-1, n, self.k, self.v))
+
+        o = v_tensor * tf.expand_dims(s_tensor, axis=-1)
+        o = self.relu_layer(o)
+        x = tf.reduce_sum(o, axis=2)
+
+        #####
+
         x = self.dense_layer_node_2(x)
         x = self.relu_layer(x)  # (batch_size, n_config_nodes_upper_limit, n_units)
 
@@ -385,7 +431,7 @@ class LayoutMLP(MLP):
         x = tf.reduce_sum(x, axis=1)
         x = x / tf.expand_dims(tf.cast(valid_mask, tf.float32), axis=-1)
 
-        # x = tf.concat([x, graph_descriptor, subset_info], axis=-1)
+        x = tf.concat([x, graph_descriptor, subset_info], axis=-1)
         x = tf.concat([x, graph_descriptor], axis=-1)
         x = self.dense_layer_global_1(x)
         x = self.relu_layer(x)

@@ -340,13 +340,13 @@ class LayoutDataset:
             dataset = dataset.shuffle(buffer_size=10)
             if set_name == 'train':
                 dataset = dataset.batch(self.batch_per_file_size, drop_remainder=True)
-            return dataset.prefetch(2)
+            return dataset
 
         dataset = dataset.interleave(
             interleave_fn,
-            cycle_length=20,
-            num_parallel_calls=20,
-            deterministic=False)
+            cycle_length=8,
+            num_parallel_calls=8,
+            deterministic=False).prefetch(2)
         return dataset
 
     def _list_filenames(self, set_name: str) -> List[str]:
