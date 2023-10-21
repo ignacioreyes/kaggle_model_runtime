@@ -255,7 +255,7 @@ class LayoutMLP(MLP):
         self.mask_max_len = mask_max_len
         self.batch_per_file_size = batch_per_file_size
         self.k = 8
-        self.e = 32
+        self.e = 24
         self.v = layer_sizes[0]
         self.q_layer = Dense(
             self.k * self.e,
