@@ -212,7 +212,7 @@ class LayoutDataset:
         self.root_dir = 'predict-ai-model-runtime/npz_all/npz/layout/'
         self.tfrecords_dir = os.path.join(
             os.path.dirname(os.path.abspath(__file__)),
-            'layout_tfrecords_v2')
+            'layout_tfrecords_v3')
         self.batch_size = batch_size
         self.n_config_nodes_upper_limit = 750
         max_trials_training = 15_000  # None
@@ -524,8 +524,8 @@ class Layout:
         interesting features (20)
             np.arange(21, 27),  # shape dims
             np.arange(31, 37),  # reshape/broadcast dims
-            np.arange(95, 99),  # conv dims input
-            np.arange(101, 105),  # conv dims kernel
+            np.arange(95, 99),  # conv dims index input
+            np.arange(101, 105),  # conv dims index kernel
         parent output shapes (12)
         sibling shapes (n_siblings*6)
         physical layout (6)
@@ -564,12 +564,12 @@ class Layout:
         ], axis=0)
 
         selected_nodes_global = self.node_config_ids[selected_nodes_local]
-        parent_output_shapes = self.parent_info[selected_nodes_local, :12]
-        parent_phys_layout = self.parent_info[selected_nodes_local, 12:24]
+
+        parent_output_and_layout = self.parent_info[selected_nodes_local, :-2]
         parent_opcodes = self.parent_info[selected_nodes_local, -2:]
 
-        sibling_info_log, sibling_info_not_log = self.compute_sibling_info(
-            trial_index, selected_nodes_local)
+        sibling_info = self.compute_sibling_info(
+            trial_index, selected_nodes_local, node_layout_configuration)
 
         node_types = self.node_opcode[selected_nodes_global]
         node_types = tf.expand_dims(node_types, axis=1)
@@ -577,25 +577,15 @@ class Layout:
         node_features_array = self.node_feat[:, interesting_node_features]
         node_features_array = node_features_array[selected_nodes_global]
 
-        features_that_need_log = np.concatenate(
-            [
-                node_features_array[:, :-6],
-                parent_output_shapes,
-                sibling_info_log
-            ],
-            axis=1
-        )
-        features_that_need_log = magic_log_v(features_that_need_log)
         features = np.concatenate(
             [
-                features_that_need_log,
-                node_features_array[:, -6:],  # phys layout
+                sibling_info[:, :-self.n_siblings],
+                node_features_array,
                 node_layout_configuration,  # layout configuration
-                parent_phys_layout,
-                sibling_info_not_log[:, :18*self.n_siblings],
+                parent_output_and_layout,
                 # all the following are opcodes
                 parent_opcodes,
-                sibling_info_not_log[:, -self.n_siblings:],
+                sibling_info[:, -self.n_siblings:],
                 node_types
             ],
             axis=1
@@ -623,6 +613,15 @@ class Layout:
         for node_index in configurable_nodes_ids:
             parent_indexes = adjacency_matrix[node_index, :].nonzero()[0]
 
+            # check no more than 2 parents
+            parent_indexes = parent_indexes[:2]
+            # first parent has to be the largest
+            if len(parent_indexes) == 2:
+                p0_size = node_features[parent_indexes[0], 28]
+                p1_size = node_features[parent_indexes[1], 28]
+                if p0_size < p1_size:
+                    parent_indexes[0], parent_indexes[1] = parent_indexes[1], parent_indexes[0]
+
             # parent info:
             # from 0 to 5: shapes 1st parent
             # 6 to 11: shapes 2nd parent
@@ -631,8 +630,7 @@ class Layout:
             # 24, 25: parent opcodes
             parent_info = np.zeros(26, dtype=int)
 
-            # check no more than 2 parents
-            for i in range(min(len(parent_indexes), 2)):
+            for i in range(len(parent_indexes)):
                 parent_index = parent_indexes[i]
                 parent_info[i*6:i*6+6] = node_features[parent_index, np.arange(21, 27)]
                 parent_info[i*6+12:i*6+18] = node_features[parent_index, np.arange(134, 140)]
@@ -643,7 +641,7 @@ class Layout:
         parents_info = np.stack(parents_info_list, axis=0)
         return parents_info
 
-    def get_all_configurable_siblings(self):
+    def get_all_configurable_siblings(self) -> List[List[int]]:
         configurable_siblings = []
         for local_node_index in range(len(self.node_config_ids)):
             node_index = self.node_config_ids[local_node_index]
@@ -663,30 +661,38 @@ class Layout:
             configurable_siblings.append(siblings)
         return configurable_siblings
 
-    def compute_sibling_info(self, trial_index: int, selected_nodes_local: np.ndarray):
-        siblings_output_shape_list = []
-        siblings_not_log_list = []
-        for local_node_index in selected_nodes_local:
+    def compute_sibling_info(
+            self,
+            trial_index: int,
+            selected_nodes_local: np.ndarray,
+            node_layouts: np.ndarray):
+
+        sibling_info_list = []
+        for i_node, local_node_index in enumerate(selected_nodes_local):
             siblings = self.configurable_siblings[local_node_index]
             random.shuffle(siblings)
 
             # 6 output shape
-            # 18 layout
+            # 18 + 1 layout
             # 1 opcode
             sibling_output_shape = np.zeros(self.n_siblings*6, dtype=int)
-            siblings_not_log = np.zeros(self.n_siblings * (18+1), dtype=int)
-            for i, sibling in enumerate(siblings[:self.n_siblings]):
-                sibling_output_shape[i * 6:i * 6 + 6] = self.node_feat[sibling, np.arange(21, 27)]
+            layout_and_opcode = np.zeros(self.n_siblings * (18+1+1), dtype=int)
+            node_layout = node_layouts[i_node]
+            for i_sibling, sibling_global_index in enumerate(siblings[:self.n_siblings]):
+                sibling_output_shape[i_sibling * 6:i_sibling * 6 + 6] = self.node_feat[sibling_global_index, np.arange(21, 27)]
 
-                local_sibling_index = np.where(self.node_config_ids == sibling)[0][0]
-                siblings_not_log[i*18:i*18+18] = self.node_config_feat[trial_index, local_sibling_index, :]
-                siblings_not_log[-(i+1)] = self.node_opcode[sibling]
-            siblings_output_shape_list.append(sibling_output_shape)
-            siblings_not_log_list.append(siblings_not_log)
+                local_sibling_index = np.where(self.node_config_ids == sibling_global_index)[0][0]
+                sibling_layout = self.node_config_feat[trial_index, local_sibling_index, :]
+                layout_and_opcode[i_sibling*19:i_sibling*19+18] = sibling_layout
+                is_layout_equal = np.all(node_layout == sibling_layout).astype(int)*2-1
+                layout_and_opcode[i_sibling * 19 + 18] = is_layout_equal
+                layout_and_opcode[-(i_sibling+1)] = self.node_opcode[sibling_global_index]
 
-        siblings_output_shape_all = np.stack(siblings_output_shape_list, axis=0)
-        siblings_not_log_all = np.stack(siblings_not_log_list, axis=0)
-        return siblings_output_shape_all, siblings_not_log_all
+            sibling_info = np.concatenate([sibling_output_shape, layout_and_opcode])
+            sibling_info_list.append(sibling_info)
+
+        sibling_info_array = np.stack(sibling_info_list, axis=0)
+        return sibling_info_array
 
 
 if __name__ == '__main__':
@@ -694,7 +700,7 @@ if __name__ == '__main__':
         batch_size=192,
         train_sample_fraction=1.0,
         subset=None,
-        build_tfrecords=False,
+        build_tfrecords=True,
         batch_per_file_size=8
     )
 

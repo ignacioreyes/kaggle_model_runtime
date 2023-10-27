@@ -496,15 +496,18 @@ class LayoutMLP(MLP):
         for i, batch in enumerate(dataset):
             if i % 100 == 0:
                 config_descriptors = batch['node_descriptor']
+                valid_nodes = batch['valid_nodes']  # ignore zero padding
+                ignore_opcodes = config_descriptors[:, :, :-(1+2+self.n_siblings)].numpy()
+                for j in range(self.batch_size):
+                    descriptor = ignore_opcodes[j, :valid_nodes[j], :]
+                    config_desc_list.append(descriptor)
 
-                # last features are not used here (opcodes)
-                config_desc_list.append(config_descriptors[:, :, :-(1+2+self.n_siblings)])
             if i > 1_000:
                 break
 
         config_desc_list = np.concatenate(config_desc_list, axis=0)
-        mean = np.mean(config_desc_list, axis=(0, 1))
-        std = np.std(config_desc_list, axis=(0, 1))
+        mean = np.mean(config_desc_list, axis=0)
+        std = np.std(config_desc_list, axis=0)
         std = np.clip(std, 1.0, None)
         self.mean = mean
         self.std = std
