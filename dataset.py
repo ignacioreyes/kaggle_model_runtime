@@ -212,9 +212,9 @@ class LayoutDataset:
         self.root_dir = 'predict-ai-model-runtime/npz_all/npz/layout/'
         self.tfrecords_dir = os.path.join(
             os.path.dirname(os.path.abspath(__file__)),
-            'layout_tfrecords_v3')
+            'layout_tfrecords_v4')
         self.batch_size = batch_size
-        self.n_config_nodes_upper_limit = 750
+        self.n_config_nodes_upper_limit = 1000
         max_trials_training = 15_000  # None
         self.n_siblings = 3
         self.batch_per_file_size = batch_per_file_size
@@ -404,7 +404,8 @@ class LayoutDataset:
 
         def write_one_tfrecord(filename: str, n_siblings: int, max_trials: int):
             os.environ["CUDA_VISIBLE_DEVICES"] = ""
-            layout = Layout(filename, n_siblings=n_siblings, max_trials=max_trials)
+            layout = Layout(filename, n_siblings=n_siblings,
+                            max_trials=max_trials, max_nodes=self.n_config_nodes_upper_limit)
             layout_id = layout.layout_id
 
             output_filename = os.path.join(output_folder, layout_id + f':{set_name}.tfrecords')
@@ -422,8 +423,7 @@ class LayoutDataset:
                     if trial_index % 2_500 == 0:
                         print(layout_id, trial_index)
                         
-                    node_config_feat, n_valid_nodes = layout.compute_node_descriptors(
-                        trial_index, self.n_config_nodes_upper_limit)
+                    node_config_feat, n_valid_nodes = layout.compute_node_descriptors(trial_index)
                     node_descriptor_serialized = tf.io.serialize_tensor(node_config_feat).numpy()
                     record_bytes = tf.train.Example(
                         features=tf.train.Features(
@@ -448,11 +448,12 @@ class LayoutDataset:
             # write_one_tfrecord(filename, n_siblings, max_trials)
             tasks.append(delayed(write_one_tfrecord)(filename, n_siblings, max_trials))
 
-        Parallel(n_jobs=4, verbose=11, backend='loky')(tasks)
+        Parallel(n_jobs=6, verbose=11, backend='loky')(tasks)
 
 
 class Layout:
-    def __init__(self, full_filename: str, n_siblings: int, max_trials: Optional[int]):
+    def __init__(self, full_filename: str, n_siblings: int,
+            max_nodes: int, max_trials: Optional[int]):
         layout_dict = dict(np.load(full_filename))  # type: dict[str, np.ndarray]
         self.n_siblings = n_siblings
 
@@ -504,6 +505,15 @@ class Layout:
         # (n_configurable_nodes, 12)
         # 6 dims per parent, up to 2 parents
         self.configurable_siblings = self.get_all_configurable_siblings()
+        self.max_nodes = max_nodes
+        self.node_probs = self.get_node_probs()
+
+    def get_node_probs(self) -> Optional[np.ndarray]:
+        if len(self.node_config_ids) <= self.max_nodes:
+            return None
+        node_stds = np.max(np.std(self.node_config_feat, axis=0), axis=1)
+        node_stds = np.clip(node_stds, a_min=1e-6, a_max=None)
+        return node_stds / np.sum(node_stds)
 
     def compute_graph_description(self) -> np.ndarray:
         nodes, counts = np.unique(self.node_opcode, return_counts=True)
@@ -518,8 +528,7 @@ class Layout:
 
     def compute_node_descriptors(
             self,
-            trial_index: int,
-            max_nodes: Optional[int]) -> Tuple[np.ndarray, int]:
+            trial_index: int) -> Tuple[np.ndarray, int]:
         """
         interesting features (20)
             np.arange(21, 27),  # shape dims
@@ -535,7 +544,6 @@ class Layout:
         opcode (1)
 
         :param trial_index:
-        :param max_nodes:
         :return:
         """
 
@@ -544,13 +552,15 @@ class Layout:
         # (n_configurable_nodes, 18)
 
         n_config_nodes = len(node_layout_configuration)
-        n_valid_nodes = min(n_config_nodes, max_nodes)
+        n_valid_nodes = min(n_config_nodes, self.max_nodes)
 
         selected_nodes_local = np.arange(n_config_nodes)
-        if n_config_nodes > max_nodes:
+        if n_config_nodes > self.max_nodes:
             selected_nodes_local = np.random.choice(
                 selected_nodes_local,
-                max_nodes)
+                self.max_nodes,
+                p=self.node_probs
+            )
 
         node_layout_configuration = node_layout_configuration[selected_nodes_local, :]
         # (n_valid_nodes, 18)
@@ -591,7 +601,7 @@ class Layout:
             axis=1
         )
 
-        padding_size = max_nodes - n_config_nodes
+        padding_size = self.max_nodes - n_config_nodes
         if padding_size > 0:
             features = np.concatenate(
                 [
