@@ -295,7 +295,7 @@ class LayoutDataset:
             final_dataset = datasets[0]
             final_dataset = final_dataset.batch(self.batch_size)
 
-        final_dataset = final_dataset.prefetch(5)
+        final_dataset = final_dataset.prefetch(2)
 
         return final_dataset
 
@@ -333,7 +333,7 @@ class LayoutDataset:
         else:
             dataset = dataset.batch(self.batch_size)
 
-        dataset = dataset.prefetch(5)
+        dataset = dataset.prefetch(2)
 
         return dataset
 
@@ -344,16 +344,17 @@ class LayoutDataset:
         def interleave_fn(filename: str) -> tf.data.Dataset:
             dataset = tf.data.TFRecordDataset(filename, compression_type='GZIP')
             dataset = dataset.map(self.tfrecord_decoder, num_parallel_calls=tf.data.AUTOTUNE)
-            dataset = dataset.shuffle(buffer_size=25)
+            dataset = dataset.shuffle(buffer_size=20)
             if set_name == 'train':
+                dataset = dataset.take(1000)
                 dataset = dataset.batch(self.batch_per_file_size, drop_remainder=True)
             return dataset
 
         dataset = dataset.interleave(
             interleave_fn,
-            cycle_length=16,
-            num_parallel_calls=16,
-            deterministic=False).prefetch(8)
+            cycle_length=12,
+            num_parallel_calls=12,
+            deterministic=False)
         return dataset
 
     def _list_filenames(self, set_name: str) -> List[str]:
@@ -530,19 +531,24 @@ class Layout:
             self,
             trial_index: int) -> Tuple[np.ndarray, int]:
         """
-        interesting features (20)
-            np.arange(21, 27),  # shape dims
-            np.arange(31, 37),  # reshape/broadcast dims
-            np.arange(95, 99),  # conv dims index input
-            np.arange(101, 105),  # conv dims index kernel
-        parent output shapes (12)
-        sibling shapes (n_siblings*6)
-        physical layout (6)
-        siblings layout (n_sibling*18)
-        parent opcodes (2)
-        sibling opcodes (n_siblings)
-        opcode (1)
+        sibling_info:
+            sibling output shape: n_siblings*6
+            sibling layout and is_layout_equal: n_sibling*(18+1)
+        node features:
+            node output shape: 6
+            reshape/broadcast dims: 6
+            conv dims input: 4
+            conv dims kernel: 4
+            physical layout: 6
+        node layout: 18
+        parents:
+            parents output shapes: 2*6
+            parents phys layout: 2*6
+        parents opcodes: 2
+        siblings opcodes: n_siblings
+        node opcode: 1
 
+        if n_siblings == 3, -> 149 features
         :param trial_index:
         :return:
         """
@@ -710,7 +716,7 @@ if __name__ == '__main__':
         batch_size=192,
         train_sample_fraction=1.0,
         subset=None,
-        build_tfrecords=True,
+        build_tfrecords=False,
         batch_per_file_size=8
     )
 
@@ -721,6 +727,14 @@ if __name__ == '__main__':
 
     for i, sample in enumerate(dataset.train_data):
         print(np.unique(sample['layout_id'].numpy()))
-        if i == 10:
-            print(sample)
-            break
+        if i == 20:
+            node_features = sample['node_descriptor'].numpy()[0, 111, :]
+            print(node_features)
+            n_siblings = 3
+            features_with_dims = np.concatenate([
+                np.arange(n_siblings * 6),
+                np.arange(6) + n_siblings * 6 + n_siblings * (18 + 1),
+                np.arange(12) + n_siblings * 6 + n_siblings * (18 + 1) + 6 + 6 + 4 + 4 + 6 + 18
+            ])
+            print(node_features[features_with_dims].reshape(-1, 6))
+            exit()

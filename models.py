@@ -321,9 +321,9 @@ class LayoutMLP(MLP):
         #     staircase=True)
         lr_schedule = tf.keras.optimizers.schedules.CosineDecay(
             initial_learning_rate=0.0,
-            decay_steps=150000,
+            decay_steps=250000,
             warmup_target=learning_rate,
-            warmup_steps=5000,
+            warmup_steps=10000,
             alpha=1e-2
         )
 
@@ -341,6 +341,13 @@ class LayoutMLP(MLP):
         self.l1_multiplier = l1_multiplier
         self.max_validations_without_improvement = validations_without_improvement
         self.n_siblings = n_siblings
+        self.features_with_dims = np.concatenate([
+            np.arange(self.n_siblings*6),
+            np.arange(6) + self.n_siblings*6+self.n_siblings*(18+1),
+            np.arange(12) + self.n_siblings*6+self.n_siblings*(18+1)+6+6+4+4+6+18
+        ])
+        self.features_with_dims_complement = np.array([
+            i for i in range(149-(1+2+self.n_siblings)) if i not in self.features_with_dims])
 
     @tf.function
     def train_step(self, batch: dict[str, tf.Tensor]):
@@ -369,7 +376,7 @@ class LayoutMLP(MLP):
         return loss_value
 
     def call(self, x, training=False):
-        layout_ids, config_descriptor, valid_mask, graph_descriptor = x
+        layout_ids, node_descriptor, valid_mask, graph_descriptor = x
 
         with tf.device('/cpu:0'):
             subset_info = tf.map_fn(
@@ -384,8 +391,8 @@ class LayoutMLP(MLP):
         subset_info = subset_info[:, 0, :]
 
         n_opcodes = 1 + 2 + self.n_siblings
-        node_operations = config_descriptor[:, :, -n_opcodes:]
-        config_descriptor = config_descriptor[:, :, :-n_opcodes]
+        node_operations = node_descriptor[:, :, -n_opcodes:]
+        node_descriptor = node_descriptor[:, :, :-n_opcodes]
         node_operations = tf.cast(node_operations, tf.int32)
         # node_operations.shape == (batch_size, mask_max_len, (1+2+self.n_siblings))
         node_embedding = self.embedding_layer_node_ops(node_operations)
@@ -394,7 +401,29 @@ class LayoutMLP(MLP):
             node_embedding,
             (-1, self.mask_max_len, n_opcodes*self.node_embedding_size))
 
-        x = (config_descriptor - self.mean) / self.std
+        node_descriptor_wo_shapes = tf.gather(
+            node_descriptor,
+            self.features_with_dims_complement,
+            axis=-1)
+
+        node_descriptor_shapes = tf.gather(
+            node_descriptor,
+            self.features_with_dims,
+            axis=-1)
+
+        node_descriptor_shapes = tf.clip_by_value(
+            node_descriptor_shapes,
+            clip_value_min=1/np.e,
+            clip_value_max=1e10
+        )
+        node_descriptor_shapes = tf.math.log(node_descriptor_shapes)
+
+        node_descriptor = tf.concat([
+            node_descriptor_shapes,
+            node_descriptor_wo_shapes
+        ], axis=-1)
+
+        x = (node_descriptor - self.mean) / self.std
 
         x = tf.concat([x, node_embedding], axis=-1)
 
@@ -497,9 +526,25 @@ class LayoutMLP(MLP):
             if i % 100 == 0:
                 config_descriptors = batch['node_descriptor']
                 valid_nodes = batch['valid_nodes']  # ignore zero padding
-                ignore_opcodes = config_descriptors[:, :, :-(1+2+self.n_siblings)].numpy()
+                node_descriptor = config_descriptors[:, :, :-(1+2+self.n_siblings)].numpy()
+
+                node_descriptor_wo_shapes = node_descriptor[:, :, self.features_with_dims_complement]
+                node_descriptor_shapes = node_descriptor[:, :, self.features_with_dims]
+
+                node_descriptor_shapes = np.clip(
+                    node_descriptor_shapes,
+                    a_min=1 / np.e,
+                    a_max=1e10
+                )
+                node_descriptor_shapes = np.log(node_descriptor_shapes)
+
+                node_descriptor = np.concatenate([
+                    node_descriptor_shapes,
+                    node_descriptor_wo_shapes
+                ], axis=-1)
+
                 for j in range(self.batch_size):
-                    descriptor = ignore_opcodes[j, :valid_nodes[j], :]
+                    descriptor = node_descriptor[j, :valid_nodes[j], :]
                     config_desc_list.append(descriptor)
 
             if i > 1_000:
