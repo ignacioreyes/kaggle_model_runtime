@@ -295,7 +295,7 @@ class LayoutDataset:
             final_dataset = datasets[0]
             final_dataset = final_dataset.batch(self.batch_size)
 
-        final_dataset = final_dataset.prefetch(2)
+        final_dataset = final_dataset.prefetch(3)
 
         return final_dataset
 
@@ -346,7 +346,7 @@ class LayoutDataset:
             dataset = dataset.map(self.tfrecord_decoder, num_parallel_calls=tf.data.AUTOTUNE)
             dataset = dataset.shuffle(buffer_size=20)
             if set_name == 'train':
-                dataset = dataset.take(1000)
+                dataset = dataset.take(1500)
                 dataset = dataset.batch(self.batch_per_file_size, drop_remainder=True)
             return dataset
 

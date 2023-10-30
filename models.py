@@ -254,7 +254,7 @@ class LayoutMLP(MLP):
         self.id_key = 'layout_id'
         self.mask_max_len = mask_max_len
         self.batch_per_file_size = batch_per_file_size
-        self.k = 8
+        self.k = 12
         self.e = 24
         self.v = layer_sizes[0]
         self.q_layer = Dense(
@@ -269,7 +269,7 @@ class LayoutMLP(MLP):
             self.k * self.v,
             name='v_layer',
         )
-        self.charlie_dropout = Dropout(0.1)
+        self.charlie_dropout = Dropout(0.15)
         self.dense_layer_node_2 = Dense(
             layer_sizes[1],
             activation=None,
