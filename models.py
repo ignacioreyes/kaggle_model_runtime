@@ -81,8 +81,7 @@ class MLP(Model, ABC):
 
         training_dataset = dataset.train_data
         validation_dataset = dataset.valid_data
-        with tf.device('/cpu:0'):
-            self.fit_normalizations(training_dataset)
+        self.fit_normalizations(training_dataset)
 
         iteration = 0
         epoch = 0
@@ -243,7 +242,6 @@ class LayoutMLP(MLP):
             validation_frequency: int,
             batch_per_file_size: int,
             layer_sizes: List[int],
-            decay_rate: float,
             validations_without_improvement: int,
             node_embedding_size: int,
             loss: str,
@@ -314,11 +312,6 @@ class LayoutMLP(MLP):
         )
         self.embedding_layer_subset_info = Embedding(6, 6, input_length=1)
 
-        # lr_schedule = tf.keras.optimizers.schedules.ExponentialDecay(
-        #     initial_learning_rate=learning_rate,
-        #     decay_steps=10_000,
-        #     decay_rate=decay_rate,
-        #     staircase=True)
         lr_schedule = tf.keras.optimizers.schedules.CosineDecay(
             initial_learning_rate=0.0,
             decay_steps=250000,
@@ -341,10 +334,29 @@ class LayoutMLP(MLP):
         self.l1_multiplier = l1_multiplier
         self.max_validations_without_improvement = validations_without_improvement
         self.n_siblings = n_siblings
+
+        self.sibling_output_shapes = np.arange(self.n_siblings*6)
+        self.node_output_shapes = np.arange(6) + self.n_siblings*6+self.n_siblings*(18+1)
+        self.parents_output_shapes = np.arange(12) + self.n_siblings*6+self.n_siblings*(18+1)+6+6+4+4+6+18
+
+        self.node_order = np.arange(6) + self.n_siblings*6+self.n_siblings*(18+1)+6+6+4+4+6
+
+        self.siblings_order = []
+        for sibling_i in range(self.n_siblings):
+            sibling_order = np.arange(6) + self.n_siblings*6 + sibling_i*19
+            self.siblings_order.append(sibling_order)
+        self.siblings_order = np.concatenate(self.siblings_order)
+
+        self.parents_order = [
+            np.arange(6) + self.n_siblings*6+self.n_siblings*(18+1)+6+6+4+4+6 + 6,
+            np.arange(6) + self.n_siblings*6+self.n_siblings*(18+1)+6+6+4+4+6 + 12,
+        ]
+        self.parents_order = np.concatenate(self.parents_order)
+
         self.features_with_dims = np.concatenate([
-            np.arange(self.n_siblings*6),
-            np.arange(6) + self.n_siblings*6+self.n_siblings*(18+1),
-            np.arange(12) + self.n_siblings*6+self.n_siblings*(18+1)+6+6+4+4+6+18
+            self.sibling_output_shapes,
+            self.node_output_shapes,
+            self.parents_output_shapes
         ])
         self.features_with_dims_complement = np.array([
             i for i in range(149-(1+2+self.n_siblings)) if i not in self.features_with_dims])
@@ -358,9 +370,6 @@ class LayoutMLP(MLP):
                 tf.reshape(targets, (-1, self.batch_per_file_size)),
                 tf.reshape(y_pred, (-1, self.batch_per_file_size))
             )
-
-            #abs_error = tf.math.abs(targets - y_pred)
-            #abs_error = tf.reduce_mean(tf.clip_by_value(abs_error, clip_value_min=0, clip_value_max=5))
 
             loss_value = loss_value \
                              + tf.keras.regularizers.L1(l1=10*self.l1_multiplier)(self.q_layer.kernel) \
@@ -410,6 +419,34 @@ class LayoutMLP(MLP):
             node_descriptor,
             self.features_with_dims,
             axis=-1)
+
+        new_order = tf.concat([
+            self.siblings_order,
+            self.node_order,
+            self.parents_order
+        ], axis=0)
+        new_order = tf.gather(
+            node_descriptor,
+            new_order,
+            axis=-1
+        )
+        new_order = tf.cast(new_order, tf.int32)
+
+        reordered_shape_list = []
+        for i in range(1+2+self.n_siblings):
+            reordered_shapes = tf.gather(
+                node_descriptor_shapes[:, :, i*6:(i+1)*6],
+                new_order[:, :, i*6:(i+1)*6],
+                axis=2,
+                batch_dims=2
+            )
+            reordered_shape_list.append(reordered_shapes)
+        reordered_shapes = tf.concat(reordered_shape_list, axis=-1)
+
+        node_descriptor_shapes = tf.concat([
+            node_descriptor_shapes,
+            reordered_shapes
+        ], axis=-1)
 
         node_descriptor_shapes = tf.clip_by_value(
             node_descriptor_shapes,
@@ -530,6 +567,29 @@ class LayoutMLP(MLP):
 
                 node_descriptor_wo_shapes = node_descriptor[:, :, self.features_with_dims_complement]
                 node_descriptor_shapes = node_descriptor[:, :, self.features_with_dims]
+
+                new_order = np.concatenate([
+                    self.siblings_order,
+                    self.node_order,
+                    self.parents_order
+                ], axis=0)
+                new_order = node_descriptor[:, :, new_order].astype(int)
+
+                reordered_shape_list = []
+                for i in range(1 + 2 + self.n_siblings):
+                    reordered_shapes = tf.gather(
+                        node_descriptor_shapes[:, :, i * 6:(i + 1) * 6],
+                        new_order[:, :, i * 6:(i + 1) * 6],
+                        axis=2,
+                        batch_dims=2
+                    ).numpy()
+                    reordered_shape_list.append(reordered_shapes)
+                reordered_shapes = np.concatenate(reordered_shape_list, axis=-1)
+
+                node_descriptor_shapes = np.concatenate([
+                    node_descriptor_shapes,
+                    reordered_shapes
+                ], axis=-1)
 
                 node_descriptor_shapes = np.clip(
                     node_descriptor_shapes,

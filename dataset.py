@@ -295,7 +295,7 @@ class LayoutDataset:
             final_dataset = datasets[0]
             final_dataset = final_dataset.batch(self.batch_size)
 
-        final_dataset = final_dataset.prefetch(3)
+        final_dataset = final_dataset.prefetch(5)
 
         return final_dataset
 
@@ -352,8 +352,8 @@ class LayoutDataset:
 
         dataset = dataset.interleave(
             interleave_fn,
-            cycle_length=12,
-            num_parallel_calls=12,
+            cycle_length=10,
+            num_parallel_calls=10,
             deterministic=False)
         return dataset
 
