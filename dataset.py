@@ -352,8 +352,8 @@ class LayoutDataset:
 
         dataset = dataset.interleave(
             interleave_fn,
-            cycle_length=10,
-            num_parallel_calls=10,
+            cycle_length=12,
+            num_parallel_calls=12,
             deterministic=False)
         return dataset
 
