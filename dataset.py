@@ -161,32 +161,26 @@ class TileDataset:
                 os.path.join(self.tfrecords_dir, filename))
 
         random.shuffle(filenames)  # inplace
-        # dataset = tf.data.Dataset.from_tensor_slices(filenames)
-        #
-        # def interleave_fn(filename: str) -> tf.data.Dataset:
-        #     dataset = tf.data.TFRecordDataset(
-        #         filename, compression_type='GZIP')
-        #     dataset = dataset.map(
-        #         self.tfrecord_decoder, num_parallel_calls=tf.data.AUTOTUNE)
-        #     dataset = dataset.shuffle(buffer_size=20)
-        #     if set_name == 'train':
-        #         dataset = dataset.batch(
-        #             self.batch_per_file_size, drop_remainder=True)
-        #     return dataset
-        #
-        # dataset = dataset.interleave(
-        #     interleave_fn,
-        #     cycle_length=20,
-        #     block_length=1,
-        #     num_parallel_calls=tf.data.AUTOTUNE,
-        #     deterministic=False)
+        dataset = tf.data.Dataset.from_tensor_slices(filenames)
 
-        dataset = tf.data.TFRecordDataset(
-            filenames,
-            compression_type='GZIP',
-            num_parallel_reads=20
-        )
-        dataset = dataset.map(self.tfrecord_decoder, num_parallel_calls=16)
+        def interleave_fn(filename: str) -> tf.data.Dataset:
+            dataset = tf.data.TFRecordDataset(
+                filename, compression_type='GZIP')
+            dataset = dataset.map(
+                self.tfrecord_decoder, num_parallel_calls=tf.data.AUTOTUNE)
+            if set_name == 'train':
+                dataset = dataset.shuffle(buffer_size=24)
+                dataset = dataset.take(1000)
+                dataset = dataset.batch(
+                    self.batch_per_file_size, drop_remainder=True)
+            return dataset
+
+        dataset = dataset.interleave(
+            interleave_fn,
+            cycle_length=60,
+            block_length=1,
+            num_parallel_calls=tf.data.AUTOTUNE,
+            deterministic=False)
 
         if set_name == 'train':
             batch_size = (self.batch_size // self.batch_per_file_size) * self.batch_per_file_size
@@ -344,8 +338,8 @@ class LayoutDataset:
         def interleave_fn(filename: str) -> tf.data.Dataset:
             dataset = tf.data.TFRecordDataset(filename, compression_type='GZIP')
             dataset = dataset.map(self.tfrecord_decoder, num_parallel_calls=tf.data.AUTOTUNE)
-            dataset = dataset.shuffle(buffer_size=20)
             if set_name == 'train':
+                dataset = dataset.shuffle(buffer_size=20)
                 dataset = dataset.take(1500)
                 dataset = dataset.batch(self.batch_per_file_size, drop_remainder=True)
             return dataset

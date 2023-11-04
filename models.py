@@ -149,43 +149,55 @@ class TileMLP(MLP):
         super().__init__(batch_size, validation_frequency=10_000)
         self.id_key = 'tile_id'
         self.batch_per_file_size = batch_per_file_size
-        self.normalization_layer = Normalization(axis=-1)
         self.dense_layer_1 = Dense(
-            100,
-            activation=None,
-            kernel_initializer='he_uniform',
+            150,
             name='dense_layer_1',
         )
+        self.dropout = Dropout(0.2)
         self.dense_layer_2 = Dense(
-            30,
-            activation=None,
-            kernel_initializer='he_uniform',
+            50,
             name='dense_layer_2',
         )
         self.dense_layer_3 = Dense(
             1,
-            name='dense_layer_3'
+            name='dense_layer_3',
+            use_bias=False
         )
 
-        self.relu_layer = ReLU(max_value=10.0, negative_slope=0.01)
+        self.activation = tf.nn.silu
 
-        lr_schedule = tf.keras.optimizers.schedules.ExponentialDecay(
-            initial_learning_rate=learning_rate,
-            decay_steps=5_000,
-            decay_rate=0.9,
-            staircase=True)
+        lr_schedule = tf.keras.optimizers.schedules.CosineDecay(
+            initial_learning_rate=0.0,
+            decay_steps=100000,
+            warmup_target=learning_rate,
+            warmup_steps=5000,
+            alpha=5e-2
+        )
 
-        self.optimizer = tf.keras.optimizers.Adam(learning_rate=lr_schedule)
+        self.optimizer = tf.keras.optimizers.Adam(
+            learning_rate=lr_schedule,
+            clipnorm=1.0
+        )
         self.loss_computer = tfr.keras.losses.PairwiseHingeLoss()
 
-        self.max_validations_without_improvement = 3
+        self.max_validations_without_improvement = 5
 
-    def call(self, x):
-        x = self.normalization_layer(x)
+    def call(self, x, training=False):
+
+        x = tf.clip_by_value(
+            x,
+            clip_value_min=1 / np.e,
+            clip_value_max=1e6
+        )
+        x = tf.math.log(x)
+
+        x = (x - self.mean) / self.std
+
         x = self.dense_layer_1(x)
-        x = self.relu_layer(x)
+        x = self.activation(x)
+        x = self.dropout(x, training=training)
         x = self.dense_layer_2(x)
-        x = self.relu_layer(x)
+        x = self.activation(x)
         x = self.dense_layer_3(x)
         x = tf.reshape(x, (-1,))
         return x
@@ -194,7 +206,7 @@ class TileMLP(MLP):
     def train_step(self, batch: dict[str, tf.Tensor]):
         call_input, target = self.unpack_batch_with_labels(batch)
         with tf.GradientTape() as tape:
-            y_pred = self.__call__(call_input)
+            y_pred = self.__call__(call_input, training=True)
             loss_value = self.loss_computer(
                 tf.reshape(target, (-1, self.batch_per_file_size)),
                 tf.reshape(y_pred, (-1, self.batch_per_file_size))
@@ -230,7 +242,17 @@ class TileMLP(MLP):
                 break
 
         config_desc_list = np.concatenate(config_desc_list, axis=0)
-        self.normalization_layer.adapt(config_desc_list)
+        config_desc_list = np.clip(
+            config_desc_list,
+            a_min=1 / np.e,
+            a_max=1e10
+        )
+        config_desc_list = np.log(config_desc_list)
+        mean = np.mean(config_desc_list, axis=0)
+        std = np.std(config_desc_list, axis=0)
+        std = np.clip(std, 1.0, None)
+        self.mean = mean
+        self.std = std
 
 
 class LayoutMLP(MLP):
