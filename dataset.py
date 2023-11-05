@@ -35,7 +35,7 @@ class TileDataset:
         self.root_dir = 'predict-ai-model-runtime/npz_all/npz/tile/xla'
         self.tfrecords_dir = os.path.join(
             os.path.dirname(os.path.abspath(__file__)),
-            'tile_tfrecords')
+            'tile_tfrecords_v2')
         self.batch_size = batch_size
         self.batch_per_file_size = batch_per_file_size
 
@@ -80,6 +80,9 @@ class TileDataset:
                 target = np.log(target)
             # target.shape == (n_configs,)
 
+            graph_descriptor = self.compute_graph_description(
+                tile_dict['node_opcode'])
+
             config_descriptor = tile_dict['config_feat']
             # config_descriptor.shape == (n_configs, 24)
 
@@ -93,6 +96,8 @@ class TileDataset:
 
                 layout_feature = tf.train.Feature(
                     bytes_list=tf.train.BytesList(value=[tile_id.encode('UTF-8')]))
+                graph_feature = tf.train.Feature(
+                    float_list=tf.train.FloatList(value=graph_descriptor))
 
                 for i_sample in range(n_configs):
                     config_descriptor_serialized = tf.io.serialize_tensor(
@@ -106,6 +111,7 @@ class TileDataset:
                                     int64_list=tf.train.Int64List(value=[new_order[i_sample]])),
                                 'config_descriptor': tf.train.Feature(
                                     bytes_list=tf.train.BytesList(value=[config_descriptor_serialized])),
+                                'graph_descriptor': graph_feature,
                                 'target': tf.train.Feature(
                                     float_list=tf.train.FloatList(value=[target[i_sample]]))
                             }
@@ -122,6 +128,7 @@ class TileDataset:
             {'tile_id': tf.io.FixedLenFeature([], dtype=tf.string),
              'config_index': tf.io.FixedLenFeature([], dtype=tf.int64),
              'config_descriptor': tf.io.FixedLenFeature([], dtype=tf.string),
+             'graph_descriptor': tf.io.FixedLenFeature([121], dtype=tf.float32),
              'target': tf.io.FixedLenFeature([], dtype=tf.float32)
              }
         )
@@ -129,6 +136,17 @@ class TileDataset:
             parsed_example['config_descriptor'], tf.float32
         )
         return parsed_example
+
+    def compute_graph_description(self, node_opcode) -> np.ndarray:
+        nodes, counts = np.unique(node_opcode, return_counts=True)
+        descriptor = np.zeros(120, dtype=np.float32)
+        for n, c in zip(nodes, counts):
+            # n goes from 1 to 120, so we save it in n-1
+            descriptor[n-1] = c
+        n_nodes = np.sum(descriptor)
+        descriptor = descriptor / n_nodes
+        descriptor = np.concatenate([descriptor, np.array([np.log(n_nodes)])])
+        return descriptor
 
     def _list_filenames(self, set_name: str) -> List[str]:
         filenames_list = []
@@ -169,15 +187,15 @@ class TileDataset:
             dataset = dataset.map(
                 self.tfrecord_decoder, num_parallel_calls=tf.data.AUTOTUNE)
             if set_name == 'train':
-                dataset = dataset.shuffle(buffer_size=24)
-                dataset = dataset.take(1000)
+                dataset = dataset.shuffle(buffer_size=30)
+                dataset = dataset.take(1250)
                 dataset = dataset.batch(
                     self.batch_per_file_size, drop_remainder=True)
             return dataset
 
         dataset = dataset.interleave(
             interleave_fn,
-            cycle_length=60,
+            cycle_length=100,
             block_length=1,
             num_parallel_calls=tf.data.AUTOTUNE,
             deterministic=False)
@@ -706,6 +724,15 @@ class Layout:
 
 
 if __name__ == '__main__':
+    dataset = TileDataset(
+        batch_size=64,
+        batch_per_file_size=8,
+        build_tfrecords=True)
+    for batch in dataset.train_data:
+        for k, v in batch.items():
+            print(k, v.shape)
+        exit()
+
     dataset = LayoutDataset(
         batch_size=192,
         train_sample_fraction=1.0,
@@ -713,11 +740,6 @@ if __name__ == '__main__':
         build_tfrecords=False,
         batch_per_file_size=8
     )
-
-    # dataset = TileDataset(
-    #     batch_size=64,
-    #     batch_per_file_size=8,
-    #     build_tfrecords=False)
 
     for i, sample in enumerate(dataset.train_data):
         print(np.unique(sample['layout_id'].numpy()))

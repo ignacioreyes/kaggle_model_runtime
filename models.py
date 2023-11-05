@@ -137,8 +137,9 @@ class MLP(Model, ABC):
 class TileMLP(MLP):
     def unpack_batch_with_labels(self, batch: dict[str, tf.Tensor]):
         config_descriptors = batch['config_descriptor']
+        graph_descriptors = batch['graph_descriptor']
         normalized_runtimes = batch['target']
-        return config_descriptors, normalized_runtimes
+        return (config_descriptors, graph_descriptors), normalized_runtimes
 
     def __init__(
             self,
@@ -150,12 +151,12 @@ class TileMLP(MLP):
         self.id_key = 'tile_id'
         self.batch_per_file_size = batch_per_file_size
         self.dense_layer_1 = Dense(
-            150,
+            250,
             name='dense_layer_1',
         )
-        self.dropout = Dropout(0.2)
+        self.dropout = Dropout(0.15)
         self.dense_layer_2 = Dense(
-            50,
+            100,
             name='dense_layer_2',
         )
         self.dense_layer_3 = Dense(
@@ -183,6 +184,7 @@ class TileMLP(MLP):
         self.max_validations_without_improvement = 5
 
     def call(self, x, training=False):
+        x, graph_descriptor = x
 
         x = tf.clip_by_value(
             x,
@@ -192,6 +194,7 @@ class TileMLP(MLP):
         x = tf.math.log(x)
 
         x = (x - self.mean) / self.std
+        x = tf.concat([x, graph_descriptor], axis=1)
 
         x = self.dense_layer_1(x)
         x = self.activation(x)
@@ -220,7 +223,8 @@ class TileMLP(MLP):
     @tf.function
     def inference_from_batch(self, batch: dict[str, tf.Tensor]) -> tf.Tensor:
         config_descriptor = batch['config_descriptor']
-        prediction = self.__call__(config_descriptor)
+        graph_descriptor = batch['graph_descriptor']
+        prediction = self.__call__((config_descriptor, graph_descriptor))
         return prediction
 
     def compute_validation_loss(self, validation_df: pd.DataFrame) -> float:
