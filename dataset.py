@@ -204,6 +204,7 @@ class LayoutDataset:
     def __init__(
             self,
             batch_size: int,
+            dataset_take: int,
             train_sample_fraction: float,
             subset: [str, None],
             build_tfrecords: bool,
@@ -218,6 +219,7 @@ class LayoutDataset:
         max_trials_training = 15_000  # None
         self.n_siblings = 3
         self.batch_per_file_size = batch_per_file_size
+        self.dataset_take = dataset_take
 
         if build_tfrecords:
             self.create_tfrecords(
@@ -295,7 +297,7 @@ class LayoutDataset:
             final_dataset = datasets[0]
             final_dataset = final_dataset.batch(self.batch_size)
 
-        final_dataset = final_dataset.prefetch(5)
+        final_dataset = final_dataset.prefetch(2)
 
         return final_dataset
 
@@ -343,17 +345,17 @@ class LayoutDataset:
 
         def interleave_fn(filename: str) -> tf.data.Dataset:
             dataset = tf.data.TFRecordDataset(filename, compression_type='GZIP')
-            dataset = dataset.map(self.tfrecord_decoder, num_parallel_calls=tf.data.AUTOTUNE)
+            dataset = dataset.map(self.tfrecord_decoder, num_parallel_calls=2)
             dataset = dataset.shuffle(buffer_size=20)
             if set_name == 'train':
-                dataset = dataset.take(1500)
+                dataset = dataset.take(self.dataset_take)
                 dataset = dataset.batch(self.batch_per_file_size, drop_remainder=True)
             return dataset
 
         dataset = dataset.interleave(
             interleave_fn,
-            cycle_length=12,
-            num_parallel_calls=12,
+            cycle_length=10,
+            num_parallel_calls=10,
             deterministic=False)
         return dataset
 
