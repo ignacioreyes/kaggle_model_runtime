@@ -279,22 +279,28 @@ class LayoutMLP(MLP):
         self.mask_max_len = mask_max_len
         self.batch_per_file_size = batch_per_file_size
 
-        self.dropout = Dropout(0.1, noise_shape=(batch_size, 1, layer_sizes[1]))
+        #self.dropout_nodes = Dropout(0.15, noise_shape=(batch_size, 1, layer_sizes[2]))
         self.dense_layer_node_1 = Dense(
             layer_sizes[0],
             name='dense_layer_node_1',
         )
+        self.dropout_1_2 = Dropout(0.2)
         self.dense_layer_node_2 = Dense(
             layer_sizes[1],
             name='dense_layer_node_2',
         )
+        self.dropout_2_3 = Dropout(0.2)
+        self.dense_layer_node_3 = Dense(
+            layer_sizes[2],
+            name='dense_layer_node_3',
+        )
 
         self.dense_layer_global_1 = Dense(
-            layer_sizes[2],
+            layer_sizes[3],
             name='dense_layer_global_1',
         )
         self.dense_layer_global_2 = Dense(
-            layer_sizes[3],
+            layer_sizes[4],
             name='dense_layer_global_2',
         )
 
@@ -327,12 +333,12 @@ class LayoutMLP(MLP):
             decay_steps=250000,
             warmup_target=learning_rate,
             warmup_steps=10000,
-            alpha=1e-2
+            alpha=5e-2
         )
 
         self.optimizer = tf.keras.optimizers.Adam(
             learning_rate=lr_schedule,
-            clipnorm=10.0
+            clipnorm=1.0
         )
         if loss == 'pairwise_hinge':
             self.loss_computer = tfr.keras.losses.PairwiseHingeLoss()
@@ -471,10 +477,16 @@ class LayoutMLP(MLP):
 
         x = self.dense_layer_node_1(x)
         x = self.activation(x)
+        x = self.dropout_1_2(x, training=training)
 
         x = self.dense_layer_node_2(x)
         x = self.activation(x)  # (batch_size, n_config_nodes_upper_limit, n_units)
-        x = self.dropout(x, training=training)
+        x = self.dropout_2_3(x, training=training)
+        
+        x = self.dense_layer_node_3(x)
+        x = self.activation(x)
+
+        #x = self.dropout_nodes(x, training=training)
 
         float_mask = tf.sequence_mask(valid_mask, self.mask_max_len, dtype=tf.float32)
         # (batch_size, n_config_nodes_upper_limit)

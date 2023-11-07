@@ -292,9 +292,19 @@ class LayoutDataset:
                 os.path.join(self.tfrecords_dir, filename))
 
         datasets = []
-        for v in filenames_dict.values():
+        for subset, v in filenames_dict.items():
             random.shuffle(v)  # inplace
-            datasets.append(self.build_dataset_from_filenames(v, set_name))
+            if set_name == 'test':
+                take = 10000
+            elif set_name == 'valid':
+                take = 1000
+            elif 'xla' in subset:
+                take = self.dataset_take * 3
+            else:
+                take = self.dataset_take
+
+            print(set_name, subset, take)
+            datasets.append(self.build_dataset_from_filenames(v, set_name, take))
 
         if set_name == 'train':
             datasets = [dataset.repeat() for dataset in datasets]
@@ -347,11 +357,11 @@ class LayoutDataset:
         else:
             dataset = dataset.batch(self.batch_size)
 
-        dataset = dataset.prefetch(2)
+        dataset = dataset.prefetch(3)
 
         return dataset
 
-    def build_dataset_from_filenames(self, filenames: List[str], set_name: str) -> tf.data.Dataset:
+    def build_dataset_from_filenames(self, filenames: List[str], set_name: str, take: int) -> tf.data.Dataset:
         assert set_name in ('train', 'valid', 'test')
         dataset = tf.data.Dataset.from_tensor_slices(filenames)
 
@@ -360,7 +370,7 @@ class LayoutDataset:
             dataset = dataset.map(self.tfrecord_decoder, num_parallel_calls=4)
             if set_name == 'train':
                 # dataset = dataset.shuffle(buffer_size=20)
-                dataset = dataset.take(self.dataset_take)
+                dataset = dataset.take(take)
                 dataset = dataset.batch(self.batch_per_file_size, drop_remainder=True)
             return dataset
 
