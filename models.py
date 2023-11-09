@@ -454,6 +454,14 @@ class LayoutMLP(MLP):
             reordered_shape_list.append(reordered_shapes)
         reordered_shapes = tf.concat(reordered_shape_list, axis=-1)
 
+        mod_tensor_8 = tf.math.floormod(reordered_shapes - 1, 8)
+        mod_tensor_8 = tf.cast(mod_tensor_8, tf.float32)
+        mod_tensor_8 = tf.where(reordered_shapes < 0, -1.0, mod_tensor_8)
+
+        mod_tensor_128 = tf.math.floormod(reordered_shapes - 1, 128)
+        mod_tensor_128 = tf.cast(mod_tensor_128, tf.float32)
+        mod_tensor_128 = tf.where(reordered_shapes < 0, -1.0, mod_tensor_128)
+
         node_descriptor_shapes = tf.concat([
             node_descriptor_shapes,
             reordered_shapes
@@ -468,7 +476,9 @@ class LayoutMLP(MLP):
 
         node_descriptor = tf.concat([
             node_descriptor_shapes,
-            node_descriptor_wo_shapes
+            node_descriptor_wo_shapes,
+            mod_tensor_8,
+            mod_tensor_128
         ], axis=-1)
 
         x = (node_descriptor - self.mean) / self.std
@@ -582,14 +592,22 @@ class LayoutMLP(MLP):
                         new_order[:, :, i * 6:(i + 1) * 6],
                         axis=2,
                         batch_dims=2
-                    ).numpy()
+                    )
                     reordered_shape_list.append(reordered_shapes)
-                reordered_shapes = np.concatenate(reordered_shape_list, axis=-1)
+                reordered_shapes = tf.concat(reordered_shape_list, axis=-1)
 
-                node_descriptor_shapes = np.concatenate([
+                mod_tensor_8 = tf.math.floormod(reordered_shapes - 1, 8)
+                mod_tensor_8 = tf.cast(mod_tensor_8, tf.float32)
+                mod_tensor_8 = tf.where(reordered_shapes < 0, -1.0, mod_tensor_8)
+
+                mod_tensor_128 = tf.math.floormod(reordered_shapes - 1, 128)
+                mod_tensor_128 = tf.cast(mod_tensor_128, tf.float32)
+                mod_tensor_128 = tf.where(reordered_shapes < 0, -1.0, mod_tensor_128)
+
+                node_descriptor_shapes = tf.concat([
                     node_descriptor_shapes,
                     reordered_shapes
-                ], axis=-1)
+                ], axis=-1).numpy()
 
                 node_descriptor_shapes = np.clip(
                     node_descriptor_shapes,
@@ -600,7 +618,9 @@ class LayoutMLP(MLP):
 
                 node_descriptor = np.concatenate([
                     node_descriptor_shapes,
-                    node_descriptor_wo_shapes
+                    node_descriptor_wo_shapes,
+                    mod_tensor_8.numpy(),
+                    mod_tensor_128.numpy()
                 ], axis=-1)
 
                 for j in range(self.batch_size):
