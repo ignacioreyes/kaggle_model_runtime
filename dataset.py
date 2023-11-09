@@ -217,7 +217,6 @@ class LayoutDataset:
             self,
             batch_size: int,
             dataset_take: int,
-            train_sample_fraction: float,
             subset: [str, None],
             build_tfrecords: bool,
             batch_per_file_size: int
@@ -238,7 +237,6 @@ class LayoutDataset:
                 'train',
                 overwrite=False,
                 n_siblings=self.n_siblings,
-                sample_fraction=train_sample_fraction,
                 max_trials_per_graph=max_trials_training)
             self.create_tfrecords(
                 'test', overwrite=False, n_siblings=self.n_siblings)
@@ -402,15 +400,9 @@ class LayoutDataset:
             set_name: str,
             overwrite: bool,
             n_siblings: int,
-            sample_fraction: float = 1.0,
             max_trials_per_graph: int = None):
         
         filenames_list = self._list_filenames(set_name)
-        if sample_fraction != 1.0:
-            n = len(filenames_list)
-            sample_size = int(np.ceil(n * sample_fraction))
-            random_sample = np.random.choice(np.arange(n, dtype=np.int64), size=sample_size)
-            filenames_list = [filenames_list[i] for i in random_sample]
 
         if not os.path.exists(self.tfrecords_dir):
             os.mkdir(self.tfrecords_dir)
@@ -744,7 +736,6 @@ if __name__ == '__main__':
     dataset = LayoutDataset(
         batch_size=128,
         dataset_take=1500,
-        train_sample_fraction=1.0,
         subset=None,
         build_tfrecords=False,
         batch_per_file_size=8
