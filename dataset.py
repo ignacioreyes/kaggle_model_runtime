@@ -771,7 +771,7 @@ if __name__ == '__main__':
         batch_size=128,
         dataset_take=1500,
         subset=None,
-        build_tfrecords=True,
+        build_tfrecords=False,
         batch_per_file_size=8
     )
 

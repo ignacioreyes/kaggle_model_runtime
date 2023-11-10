@@ -264,46 +264,42 @@ class LayoutMLP(MLP):
             self,
             batch_size: int,
             learning_rate: float,
-            mask_max_len: int,
             validation_frequency: int,
             batch_per_file_size: int,
             layer_sizes: List[int],
             validations_without_improvement: int,
             node_embedding_size: int,
             loss: str,
-            l1_multiplier: float,
             n_siblings: int
     ):
         super().__init__(batch_size, validation_frequency=validation_frequency)
         self.id_key = 'layout_id'
-        self.mask_max_len = mask_max_len
         self.batch_per_file_size = batch_per_file_size
 
-        #self.dropout_nodes = Dropout(0.15, noise_shape=(batch_size, 1, layer_sizes[2]))
         self.dense_layer_node_1 = Dense(
             layer_sizes[0],
             name='dense_layer_node_1',
         )
-        self.dropout_1_2 = Dropout(0.2)
+        self.dropout_node_1_2 = Dropout(0.2)
         self.dense_layer_node_2 = Dense(
             layer_sizes[1],
             name='dense_layer_node_2',
         )
-        self.dropout_2_3 = Dropout(0.2)
+        self.dropout_node_2_3 = Dropout(0.2)
         self.dense_layer_node_3 = Dense(
             layer_sizes[2],
             name='dense_layer_node_3',
         )
-
         self.dense_layer_global_1 = Dense(
             layer_sizes[3],
             name='dense_layer_global_1',
         )
+        self.dropout_global_1_2 = Dropout(0.2)
         self.dense_layer_global_2 = Dense(
             layer_sizes[4],
             name='dense_layer_global_2',
         )
-
+        self.dropout_global_2_3 = Dropout(0.2)
         self.dense_layer_global_3 = Dense(
             1,
             name='dense_layer_global_3',
@@ -313,7 +309,7 @@ class LayoutMLP(MLP):
         self.activation = tf.nn.silu
         self.node_embedding_size = node_embedding_size
         self.embedding_layer_node_ops = Embedding(
-            121, node_embedding_size, input_length=mask_max_len)
+            input_dim=121, output_dim=node_embedding_size)
 
         self.text_vectorization = tf.keras.layers.TextVectorization(
             standardize=None,
@@ -330,7 +326,7 @@ class LayoutMLP(MLP):
 
         lr_schedule = tf.keras.optimizers.schedules.CosineDecay(
             initial_learning_rate=0.0,
-            decay_steps=250000,
+            decay_steps=200000,
             warmup_target=learning_rate,
             warmup_steps=10000,
             alpha=5e-2
@@ -347,7 +343,6 @@ class LayoutMLP(MLP):
         else:
             raise ValueError(f'{loss} is not a valid loss')
 
-        self.l1_multiplier = l1_multiplier
         self.max_validations_without_improvement = validations_without_improvement
         self.n_siblings = n_siblings
 
@@ -387,9 +382,6 @@ class LayoutMLP(MLP):
                 tf.reshape(y_pred, (-1, self.batch_per_file_size))
             )
 
-            loss_value = loss_value \
-                             + tf.keras.regularizers.L1(l1=self.l1_multiplier)(self.dense_layer_node_1.kernel)
-
         gradients = tape.gradient(loss_value, self.trainable_variables)
         self.optimizer.apply_gradients(zip(gradients, self.trainable_variables))
 
@@ -419,7 +411,7 @@ class LayoutMLP(MLP):
         # node_embedding.shape == (batch_size, mask_max_len, (1+2+self.n_siblings), embed_len)
         node_embedding = tf.reshape(
             node_embedding,
-            (-1, self.mask_max_len, n_opcodes*self.node_embedding_size))
+            (-1, tf.shape(node_embedding)[1], n_opcodes*self.node_embedding_size))
 
         node_descriptor_wo_shapes = tf.gather(
             node_descriptor,
@@ -487,18 +479,16 @@ class LayoutMLP(MLP):
 
         x = self.dense_layer_node_1(x)
         x = self.activation(x)
-        x = self.dropout_1_2(x, training=training)
+        x = self.dropout_node_1_2(x, training=training)
 
         x = self.dense_layer_node_2(x)
         x = self.activation(x)  # (batch_size, n_config_nodes_upper_limit, n_units)
-        x = self.dropout_2_3(x, training=training)
+        x = self.dropout_node_2_3(x, training=training)
         
         x = self.dense_layer_node_3(x)
         x = self.activation(x)
 
-        #x = self.dropout_nodes(x, training=training)
-
-        float_mask = tf.sequence_mask(valid_mask, self.mask_max_len, dtype=tf.float32)
+        float_mask = tf.sequence_mask(valid_mask, tf.shape(x)[1], dtype=tf.float32)
         # (batch_size, n_config_nodes_upper_limit)
 
         float_mask = tf.expand_dims(float_mask, axis=-1)
@@ -509,10 +499,13 @@ class LayoutMLP(MLP):
 
         x = tf.concat([x, graph_descriptor, subset_info], axis=-1)
         x = tf.concat([x, graph_descriptor], axis=-1)
+
         x = self.dense_layer_global_1(x)
         x = self.activation(x)
+        x = self.dropout_global_1_2(x, training=training)
         x = self.dense_layer_global_2(x)
         x = self.activation(x)
+        x = self.dropout_global_2_3(x, training=training)
         x = self.dense_layer_global_3(x)
         x = tf.reshape(x, (-1,))
         return x
