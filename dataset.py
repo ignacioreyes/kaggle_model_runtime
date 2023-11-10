@@ -224,10 +224,10 @@ class LayoutDataset:
         self.root_dir = 'predict-ai-model-runtime/npz_all/npz/layout/'
         self.tfrecords_dir = os.path.join(
             os.path.dirname(os.path.abspath(__file__)),
-            'layout_tfrecords_v4')
+            'layout_tfrecords_v5')
         self.batch_size = batch_size
-        self.n_config_nodes_upper_limit = 1000
-        max_trials_training = 15_000  # None
+        n_config_nodes_upper_limit = 1000
+        max_trials_training = 7500  # None
         self.n_siblings = 3
         self.batch_per_file_size = batch_per_file_size
         self.dataset_take = dataset_take
@@ -237,12 +237,22 @@ class LayoutDataset:
                 'train',
                 overwrite=False,
                 n_siblings=self.n_siblings,
-                max_trials_per_graph=max_trials_training)
+                max_trials_per_graph=max_trials_training,
+                max_nodes=n_config_nodes_upper_limit
+            )
             self.create_tfrecords(
-                'test', overwrite=False, n_siblings=self.n_siblings)
+                'test',
+                overwrite=False,
+                n_siblings=self.n_siblings,
+                max_nodes=2400
+            )
             self.create_tfrecords(
-                'valid', overwrite=False,
-                n_siblings=self.n_siblings, max_trials_per_graph=1_000)
+                'valid',
+                overwrite=False,
+                n_siblings=self.n_siblings,
+                max_trials_per_graph=1_000,
+                max_nodes=2400
+            )
 
         with tf.device('/cpu:0'):
             self.train_data = self.load_tfrecords('train', subset)
@@ -400,6 +410,7 @@ class LayoutDataset:
             set_name: str,
             overwrite: bool,
             n_siblings: int,
+            max_nodes: int,
             max_trials_per_graph: int = None):
         
         filenames_list = self._list_filenames(set_name)
@@ -407,7 +418,14 @@ class LayoutDataset:
         if not os.path.exists(self.tfrecords_dir):
             os.mkdir(self.tfrecords_dir)
         self.write_tfrecords(
-            filenames_list, set_name, n_siblings, max_trials_per_graph, self.tfrecords_dir, overwrite)
+            filenames_list,
+            set_name,
+            n_siblings,
+            max_trials_per_graph,
+            self.tfrecords_dir,
+            overwrite,
+            max_nodes
+        )
 
     def write_tfrecords(
             self,
@@ -416,13 +434,14 @@ class LayoutDataset:
             n_siblings: int,
             max_trials: int,
             output_folder: str,
-            overwrite: bool
+            overwrite: bool,
+            max_nodes: int
     ):
 
-        def write_one_tfrecord(filename: str, n_siblings: int, max_trials: int):
+        def write_one_tfrecord(filename: str, n_siblings: int, max_trials: int, max_nodes: int):
             os.environ["CUDA_VISIBLE_DEVICES"] = ""
             layout = Layout(filename, n_siblings=n_siblings,
-                            max_trials=max_trials, max_nodes=self.n_config_nodes_upper_limit)
+                            max_trials=max_trials, max_nodes=max_nodes)
             layout_id = layout.layout_id
 
             output_filename = os.path.join(output_folder, layout_id + f':{set_name}.tfrecords')
@@ -463,14 +482,14 @@ class LayoutDataset:
         tasks = []
         for filename in filenames:
             # write_one_tfrecord(filename, n_siblings, max_trials)
-            tasks.append(delayed(write_one_tfrecord)(filename, n_siblings, max_trials))
+            tasks.append(delayed(write_one_tfrecord)(filename, n_siblings, max_trials, max_nodes))
 
         Parallel(n_jobs=6, verbose=11, backend='loky')(tasks)
 
 
 class Layout:
     def __init__(self, full_filename: str, n_siblings: int,
-            max_nodes: int, max_trials: Optional[int]):
+                 max_nodes: int, max_trials: Optional[int]):
         layout_dict = dict(np.load(full_filename))  # type: dict[str, np.ndarray]
         self.n_siblings = n_siblings
 
@@ -499,6 +518,8 @@ class Layout:
         self.config_runtime = layout_dict['config_runtime']
         # (n_trials,)
 
+        self.remove_duplicated_configs()
+
         n_trials = len(self.config_runtime)
 
         if max_trials is not None and n_trials > max_trials:
@@ -524,6 +545,19 @@ class Layout:
         self.configurable_siblings = self.get_all_configurable_siblings()
         self.max_nodes = max_nodes
         self.node_probs = self.get_node_probs()
+
+    def remove_duplicated_configs(self):
+        unique_configs, inverse_index = np.unique(
+            self.node_config_feat, return_inverse=True, axis=0)
+
+        times = []
+        for i, config in enumerate(unique_configs):
+            config_times = self.config_runtime[inverse_index == i]
+            average_time = np.mean(config_times)
+            times.append(average_time)
+
+        self.node_config_feat = unique_configs
+        self.config_runtime = np.array(times)
 
     def get_node_probs(self) -> Optional[np.ndarray]:
         if len(self.node_config_ids) <= self.max_nodes:
@@ -737,11 +771,16 @@ if __name__ == '__main__':
         batch_size=128,
         dataset_take=1500,
         subset=None,
-        build_tfrecords=False,
+        build_tfrecords=True,
         batch_per_file_size=8
     )
 
     for batch in dataset.train_data:
         for k, v in batch.items():
             print(k, v.shape)
-        exit()
+        break
+
+    for batch in dataset.test_data:
+        for k, v in batch.items():
+            print(k, v.shape)
+        break
