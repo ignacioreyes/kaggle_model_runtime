@@ -238,20 +238,23 @@ class LayoutDataset:
                 overwrite=False,
                 n_siblings=self.n_siblings,
                 max_trials_per_graph=max_trials_training,
-                max_nodes=n_config_nodes_upper_limit
+                max_nodes=n_config_nodes_upper_limit,
+                remove_duplicates=True
             )
             self.create_tfrecords(
                 'test',
                 overwrite=False,
                 n_siblings=self.n_siblings,
-                max_nodes=2400
+                max_nodes=2400,
+                remove_duplicates=False
             )
             self.create_tfrecords(
                 'valid',
                 overwrite=False,
                 n_siblings=self.n_siblings,
                 max_trials_per_graph=1_000,
-                max_nodes=2400
+                max_nodes=2400,
+                remove_duplicates=False
             )
 
         with tf.device('/cpu:0'):
@@ -411,6 +414,7 @@ class LayoutDataset:
             overwrite: bool,
             n_siblings: int,
             max_nodes: int,
+            remove_duplicates: bool,
             max_trials_per_graph: int = None):
         
         filenames_list = self._list_filenames(set_name)
@@ -424,7 +428,8 @@ class LayoutDataset:
             max_trials_per_graph,
             self.tfrecords_dir,
             overwrite,
-            max_nodes
+            max_nodes,
+            remove_duplicates
         )
 
     def write_tfrecords(
@@ -435,13 +440,19 @@ class LayoutDataset:
             max_trials: int,
             output_folder: str,
             overwrite: bool,
-            max_nodes: int
+            max_nodes: int,
+            remove_duplicates: bool
     ):
 
-        def write_one_tfrecord(filename: str, n_siblings: int, max_trials: int, max_nodes: int):
+        def write_one_tfrecord(
+                filename: str, n_siblings: int,
+                max_trials: int, max_nodes: int,
+                remove_duplicates: bool
+        ):
             os.environ["CUDA_VISIBLE_DEVICES"] = ""
             layout = Layout(filename, n_siblings=n_siblings,
-                            max_trials=max_trials, max_nodes=max_nodes)
+                            max_trials=max_trials, max_nodes=max_nodes,
+                            remove_duplicates=remove_duplicates)
             layout_id = layout.layout_id
 
             output_filename = os.path.join(output_folder, layout_id + f':{set_name}.tfrecords')
@@ -482,14 +493,16 @@ class LayoutDataset:
         tasks = []
         for filename in filenames:
             # write_one_tfrecord(filename, n_siblings, max_trials)
-            tasks.append(delayed(write_one_tfrecord)(filename, n_siblings, max_trials, max_nodes))
+            tasks.append(delayed(write_one_tfrecord)(
+                filename, n_siblings, max_trials, max_nodes, remove_duplicates))
 
         Parallel(n_jobs=6, verbose=11, backend='loky')(tasks)
 
 
 class Layout:
     def __init__(self, full_filename: str, n_siblings: int,
-                 max_nodes: int, max_trials: Optional[int]):
+                 max_nodes: int, max_trials: Optional[int],
+                 remove_duplicates: bool):
         layout_dict = dict(np.load(full_filename))  # type: dict[str, np.ndarray]
         self.n_siblings = n_siblings
 
@@ -518,7 +531,8 @@ class Layout:
         self.config_runtime = layout_dict['config_runtime']
         # (n_trials,)
 
-        self.remove_duplicated_configs()
+        if remove_duplicates:
+            self.remove_duplicated_configs()
 
         n_trials = len(self.config_runtime)
 

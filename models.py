@@ -107,7 +107,7 @@ class MLP(Model, ABC):
                 if iteration % self.validation_frequency == 0:
                     val_df = self.predict_over_dataset(
                         validation_dataset, return_labels=True)
-                    validation_loss = self.compute_validation_loss(val_df)
+                    validation_loss = self.compute_validation_loss(val_df, dataset)
                     print(f'epoch {epoch}, it {iteration} validation loss {validation_loss:.3f}')
                     if validation_callback is not None:
                         validation_callback(iteration, -validation_loss)
@@ -118,7 +118,7 @@ class MLP(Model, ABC):
             epoch += 1
 
     @abstractmethod
-    def compute_validation_loss(self, validation_df: pd.DataFrame) -> float:
+    def compute_validation_loss(self, validation_df: pd.DataFrame, dataset) -> float:
         pass
 
     def _evaluate_training_stopper(self, current_validation_loss):
@@ -227,7 +227,7 @@ class TileMLP(MLP):
         prediction = self.__call__((config_descriptor, graph_descriptor))
         return prediction
 
-    def compute_validation_loss(self, validation_df: pd.DataFrame) -> float:
+    def compute_validation_loss(self, validation_df: pd.DataFrame, dataset) -> float:
         def metric_per_id(df):
             top = df.sort_values('prediction').iloc[:5]
             best_attempt = np.min(top['target'])
@@ -270,10 +270,13 @@ class LayoutMLP(MLP):
             validations_without_improvement: int,
             node_embedding_size: int,
             loss: str,
-            n_siblings: int
+            n_siblings: int,
+            l1_multiplier: float,
+            output_name: str
     ):
         super().__init__(batch_size, validation_frequency=validation_frequency)
         self.id_key = 'layout_id'
+        self.output_name = output_name
         self.batch_per_file_size = batch_per_file_size
 
         self.dense_layer_node_1 = Dense(
@@ -290,16 +293,16 @@ class LayoutMLP(MLP):
             layer_sizes[2],
             name='dense_layer_node_3',
         )
+
+        assert (layer_sizes[3] % 4) == 0
         self.dense_layer_global_1 = Dense(
             layer_sizes[3],
             name='dense_layer_global_1',
         )
-        self.dropout_global_1_2 = Dropout(0.2)
         self.dense_layer_global_2 = Dense(
             layer_sizes[4],
             name='dense_layer_global_2',
         )
-        self.dropout_global_2_3 = Dropout(0.2)
         self.dense_layer_global_3 = Dense(
             1,
             name='dense_layer_global_3',
@@ -322,7 +325,6 @@ class LayoutMLP(MLP):
                 b'layoutxlarandom'
             ]
         )
-        self.embedding_layer_subset_info = Embedding(6, 6, input_length=1)
 
         lr_schedule = tf.keras.optimizers.schedules.CosineDecay(
             initial_learning_rate=0.0,
@@ -336,6 +338,7 @@ class LayoutMLP(MLP):
             learning_rate=lr_schedule,
             clipnorm=1.0
         )
+        self.l1_multiplier = l1_multiplier
         if loss == 'pairwise_hinge':
             self.loss_computer = tfr.keras.losses.PairwiseHingeLoss()
         elif loss == 'list_mle':
@@ -372,6 +375,13 @@ class LayoutMLP(MLP):
         self.features_with_dims_complement = np.array([
             i for i in range(149-(1+2+self.n_siblings)) if i not in self.features_with_dims])
 
+        self.best_val_subsets = {
+            'layout:nlp:random': 0.0,
+            'layout:nlp:default': 0.0,
+            'layout:xla:random': 0.0,
+            'layout:xla:default': 0.0
+        }
+
     @tf.function
     def train_step(self, batch: dict[str, tf.Tensor]):
         call_input, targets = self.unpack_batch_with_labels(batch)
@@ -381,6 +391,8 @@ class LayoutMLP(MLP):
                 tf.reshape(targets, (-1, self.batch_per_file_size)),
                 tf.reshape(y_pred, (-1, self.batch_per_file_size))
             )
+            loss_value = loss_value \
+                         + tf.keras.regularizers.L1(l1=self.l1_multiplier)(self.dense_layer_node_1.kernel)
 
         gradients = tape.gradient(loss_value, self.trainable_variables)
         self.optimizer.apply_gradients(zip(gradients, self.trainable_variables))
@@ -398,9 +410,12 @@ class LayoutMLP(MLP):
             )
 
         subset_info = self.text_vectorization(subset_info)
-        subset_info = tf.expand_dims(subset_info, axis=-1)
-        subset_info = self.embedding_layer_subset_info(subset_info)
-        subset_info = subset_info[:, 0, :]
+        one_hot_subset = tf.one_hot(subset_info-2, depth=4)
+        one_hot_subset = tf.expand_dims(one_hot_subset, axis=-1)
+
+        # reduce unnecessary computation, sometimes is useful
+        # valid_mask_max = tf.reduce_max(valid_mask)
+        # node_descriptor = node_descriptor[:, :tf.cast(valid_mask_max, tf.int32), :]
 
         n_opcodes = 1 + 2 + self.n_siblings
         node_operations = node_descriptor[:, :, -n_opcodes:]
@@ -446,14 +461,6 @@ class LayoutMLP(MLP):
             reordered_shape_list.append(reordered_shapes)
         reordered_shapes = tf.concat(reordered_shape_list, axis=-1)
 
-        mod_tensor_8 = tf.math.floormod(reordered_shapes - 1, 8)
-        mod_tensor_8 = tf.cast(mod_tensor_8, tf.float32)
-        mod_tensor_8 = tf.where(reordered_shapes < 0, -1.0, mod_tensor_8)
-
-        mod_tensor_128 = tf.math.floormod(reordered_shapes - 1, 128)
-        mod_tensor_128 = tf.cast(mod_tensor_128, tf.float32)
-        mod_tensor_128 = tf.where(reordered_shapes < 0, -1.0, mod_tensor_128)
-
         node_descriptor_shapes = tf.concat([
             node_descriptor_shapes,
             reordered_shapes
@@ -468,9 +475,7 @@ class LayoutMLP(MLP):
 
         node_descriptor = tf.concat([
             node_descriptor_shapes,
-            node_descriptor_wo_shapes,
-            mod_tensor_8,
-            mod_tensor_128
+            node_descriptor_wo_shapes
         ], axis=-1)
 
         x = (node_descriptor - self.mean) / self.std
@@ -497,15 +502,17 @@ class LayoutMLP(MLP):
         x = tf.reduce_sum(x, axis=1)
         x = x / tf.expand_dims(tf.cast(valid_mask, tf.float32), axis=-1)
 
-        x = tf.concat([x, graph_descriptor, subset_info], axis=-1)
         x = tf.concat([x, graph_descriptor], axis=-1)
-
         x = self.dense_layer_global_1(x)
+
+        global_1_layer_size = tf.shape(x)[1]
+        x = tf.reshape(x, (-1, 4, global_1_layer_size // 4))
+        x = x * one_hot_subset
+        x = tf.reduce_sum(x, axis=1)
+
         x = self.activation(x)
-        x = self.dropout_global_1_2(x, training=training)
         x = self.dense_layer_global_2(x)
         x = self.activation(x)
-        x = self.dropout_global_2_3(x, training=training)
         x = self.dense_layer_global_3(x)
         x = tf.reshape(x, (-1,))
         return x
@@ -519,7 +526,7 @@ class LayoutMLP(MLP):
         prediction = self.__call__((layout_ids, config_descriptors, valid_mask, graph_descriptor))
         return prediction
 
-    def compute_validation_loss(self, validation_df: pd.DataFrame) -> float:
+    def compute_validation_loss(self, validation_df: pd.DataFrame, dataset) -> float:
         assert 'target' in validation_df.columns
 
         def get_set_name_from_id(bin_id):
@@ -542,15 +549,41 @@ class LayoutMLP(MLP):
             'layout:xla:random',
             'layout:xla:default',
         ]
+        update_test = []
         for subset in subsets:
             val_subset = validation_df[validation_df['subset'] == subset]
             if len(val_subset) == 0:
                 continue
             mean = np.mean(val_subset.groupby('ID').apply(compute_layout_score_group))
             print(subset, mean)
+            if mean > self.best_val_subsets[subset]:
+                update_test.append(subset)
+                self.best_val_subsets[subset] = mean
             set_means.append(mean)
 
+        if len(update_test) > 0:
+            self.update_test_prediction(update_test, dataset.test_data)
         return -float(np.mean(set_means))
+
+    def update_test_prediction(self, subsets_to_update: List[str], test_dataset: tf.data.Dataset):
+        test_df = self.predict_over_dataset(test_dataset, return_labels=False)
+
+        def sort_configs(df):
+            top = df.sort_values('prediction')
+            top = top['config_index'].values.tolist()
+            top = [str(i) for i in top]
+            return ';'.join(top)
+
+        test_prediction = test_df.groupby('ID').apply(sort_configs)
+        test_prediction.rename(index=lambda x: x.decode('UTF-8'), inplace=True)
+        test_prediction = pd.DataFrame(test_prediction, columns=['TopConfigs']).reset_index()
+        test_prediction['subset'] = test_prediction['ID'].apply(lambda x: ':'.join(x.split(':')[:3]))
+        test_prediction.set_index('ID', inplace=True)
+        for subset in subsets_to_update:
+            subset_df = test_prediction[test_prediction['subset'] == subset]
+            subset_df = subset_df[['TopConfigs']]
+            subset_df.to_csv(
+                f'predictions/{self.output_name}_{subset}.csv')
 
     def unpack_batch_with_labels(self, batch: dict[str, tf.Tensor]):
         layout_ids = batch['layout_id']
@@ -589,14 +622,6 @@ class LayoutMLP(MLP):
                     reordered_shape_list.append(reordered_shapes)
                 reordered_shapes = tf.concat(reordered_shape_list, axis=-1)
 
-                mod_tensor_8 = tf.math.floormod(reordered_shapes - 1, 8)
-                mod_tensor_8 = tf.cast(mod_tensor_8, tf.float32)
-                mod_tensor_8 = tf.where(reordered_shapes < 0, -1.0, mod_tensor_8)
-
-                mod_tensor_128 = tf.math.floormod(reordered_shapes - 1, 128)
-                mod_tensor_128 = tf.cast(mod_tensor_128, tf.float32)
-                mod_tensor_128 = tf.where(reordered_shapes < 0, -1.0, mod_tensor_128)
-
                 node_descriptor_shapes = tf.concat([
                     node_descriptor_shapes,
                     reordered_shapes
@@ -611,9 +636,7 @@ class LayoutMLP(MLP):
 
                 node_descriptor = np.concatenate([
                     node_descriptor_shapes,
-                    node_descriptor_wo_shapes,
-                    mod_tensor_8.numpy(),
-                    mod_tensor_128.numpy()
+                    node_descriptor_wo_shapes
                 ], axis=-1)
 
                 for j in range(self.batch_size):
