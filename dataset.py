@@ -264,7 +264,6 @@ class LayoutDataset:
             self,
             batch_size: int,
             dataset_take: int,
-            subset: [str, None],
             build_tfrecords: bool,
             batch_per_file_size: int
     ):
@@ -305,9 +304,9 @@ class LayoutDataset:
             )
 
         with tf.device('/cpu:0'):
-            self.train_data = self.load_tfrecords('train', subset)
-            self.test_data = self.load_tfrecords('test', subset)
-            self.valid_data = self.load_tfrecords('valid', subset)
+            self.train_data = self.load_tfrecords('train')
+            self.test_data = self.load_tfrecords('test')
+            self.valid_data = self.load_tfrecords('valid')
 
     @staticmethod
     def tfrecord_decoder(record_bytes):
@@ -328,10 +327,8 @@ class LayoutDataset:
         )
         return parsed_example
 
-    def load_tfrecords(self, set_name: str, subset: Optional[str]) -> tf.data.Dataset:
+    def load_tfrecords(self, set_name: str) -> tf.data.Dataset:
         assert set_name in ('train', 'valid', 'test')
-        if subset is not None:
-            return self.load_tfrecords_subset(set_name, subset)
 
         tfrecords_file_list = os.listdir(self.tfrecords_dir)
         filenames_dict = defaultdict(list)

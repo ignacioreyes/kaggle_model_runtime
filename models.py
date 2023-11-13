@@ -3,14 +3,12 @@ import pandas as pd
 import tensorflow as tf
 from tensorflow.keras import Model
 from tensorflow.keras.layers import Dense
-from tensorflow.keras.layers import Normalization
-from tensorflow.keras.layers import ReLU
 from tensorflow.keras.layers import Embedding
 from tensorflow.keras.layers import Dropout
 import tensorflow_ranking as tfr
 from scipy.stats import kendalltau
 from abc import abstractmethod, ABC
-from typing import List
+from typing import List, Optional
 
 
 class MLP(Model, ABC):
@@ -272,7 +270,7 @@ class LayoutMLP(MLP):
             loss: str,
             n_siblings: int,
             l1_multiplier: float,
-            output_name: str
+            output_name: Optional[str]
     ):
         super().__init__(batch_size, validation_frequency=validation_frequency)
         self.id_key = 'layout_id'
@@ -545,20 +543,21 @@ class LayoutMLP(MLP):
             'layout:xla:random',
             'layout:xla:default',
         ]
-        update_test = []
-        for subset in subsets:
-            val_subset = validation_df[validation_df['subset'] == subset]
-            if len(val_subset) == 0:
-                continue
-            mean = np.mean(val_subset.groupby('ID').apply(compute_layout_score_group))
-            print(subset, mean)
-            if mean > self.best_val_subsets[subset]:
-                update_test.append(subset)
-                self.best_val_subsets[subset] = mean
-            set_means.append(mean)
+        if self.output_name is not None:
+            update_test = []
+            for subset in subsets:
+                val_subset = validation_df[validation_df['subset'] == subset]
+                if len(val_subset) == 0:
+                    continue
+                mean = np.mean(val_subset.groupby('ID').apply(compute_layout_score_group))
+                print(subset, mean)
+                if mean > self.best_val_subsets[subset]:
+                    update_test.append(subset)
+                    self.best_val_subsets[subset] = mean
+                set_means.append(mean)
 
-        if len(update_test) > 0:
-            self.update_test_prediction(update_test, dataset.test_data)
+            if len(update_test) > 0:
+                self.update_test_prediction(update_test, dataset.test_data)
         return -float(np.mean(set_means))
 
     def update_test_prediction(self, subsets_to_update: List[str], test_dataset: tf.data.Dataset):

@@ -18,15 +18,13 @@ def training_function(config: dict):
     dataset = LayoutDataset(
         batch_size,
         dataset_take,
-        train_sample_fraction=1.0,
-        subset=None, build_tfrecords=False,
+        build_tfrecords=False,
         batch_per_file_size=batch_per_file_size
     )
 
     mlp = LayoutMLP(
         batch_size,
         learning_rate=learning_rate,
-        mask_max_len=dataset.n_config_nodes_upper_limit,
         batch_per_file_size=batch_per_file_size,
         node_embedding_size=node_embedding_size,
         validation_frequency=10_000,
@@ -34,7 +32,8 @@ def training_function(config: dict):
         layer_sizes=[config[f'layer_{i}'] for i in range(4)],
         loss=loss,
         l1_multiplier=l1_multiplier,
-        n_siblings=dataset.n_siblings
+        n_siblings=dataset.n_siblings,
+        output_name=None
     )
     mlp.train(
         dataset,
