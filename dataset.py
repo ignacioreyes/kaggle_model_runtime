@@ -334,44 +334,6 @@ class LayoutDataset:
 
         return final_dataset
 
-    def load_tfrecords_subset(self, set_name: str, subset: str) -> tf.data.Dataset:
-        assert subset in (
-            'nlp:random',
-            'nlp:default',
-            'xla:random',
-            'xla:default'
-        )
-        tfrecords_file_list = os.listdir(self.tfrecords_dir)
-        filenames = []
-
-        for filename in tfrecords_file_list:
-            f = filename[:-(len('.tfrecords'))].split(':')
-
-            file_set_name = f[-1]
-            if file_set_name != set_name:
-                continue
-
-            file_subset = ':'.join(f[1:3])
-            if file_subset != subset:
-                continue
-
-            filenames.append(
-                os.path.join(self.tfrecords_dir, filename))
-
-        random.shuffle(filenames)
-        dataset = self.build_dataset_from_filenames(filenames, set_name)
-
-        if set_name == 'train':
-            batch_size = (self.batch_size // self.batch_per_file_size) * self.batch_per_file_size
-            batch_size = int(batch_size)
-            dataset = dataset.rebatch(batch_size)
-        else:
-            dataset = dataset.batch(self.batch_size)
-
-        dataset = dataset.prefetch(3)
-
-        return dataset
-
     def build_dataset_from_filenames(self, filenames: List[str], set_name: str, take: int) -> tf.data.Dataset:
         assert set_name in ('train', 'valid', 'test')
         dataset = tf.data.Dataset.from_tensor_slices(filenames)

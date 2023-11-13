@@ -294,7 +294,6 @@ class LayoutMLP(MLP):
             name='dense_layer_node_3',
         )
 
-        assert (layer_sizes[3] % 4) == 0
         self.dense_layer_global_1 = Dense(
             layer_sizes[3],
             name='dense_layer_global_1',
@@ -325,10 +324,11 @@ class LayoutMLP(MLP):
                 b'layoutxlarandom'
             ]
         )
+        self.embedding_layer_subset_info = Embedding(6, 6, input_length=1)
 
         lr_schedule = tf.keras.optimizers.schedules.CosineDecay(
             initial_learning_rate=0.0,
-            decay_steps=200000,
+            decay_steps=250000,
             warmup_target=learning_rate,
             warmup_steps=10000,
             alpha=5e-2
@@ -349,21 +349,22 @@ class LayoutMLP(MLP):
         self.max_validations_without_improvement = validations_without_improvement
         self.n_siblings = n_siblings
 
-        self.sibling_output_shapes = np.arange(self.n_siblings*6)
-        self.node_output_shapes = np.arange(6) + self.n_siblings*6+self.n_siblings*(18+1)
-        self.parents_output_shapes = np.arange(12) + self.n_siblings*6+self.n_siblings*(18+1)+6+6+4+4+6+18
+        self.sibling_output_shapes = np.arange(self.n_siblings * 6)
+        self.node_output_shapes = np.arange(6) + self.n_siblings * 6 + self.n_siblings * (18 + 1)
+        self.parents_output_shapes = np.arange(12) + self.n_siblings * 6 + self.n_siblings * (
+                    18 + 1) + 6 + 6 + 4 + 4 + 6 + 18
 
-        self.node_order = np.arange(6) + self.n_siblings*6+self.n_siblings*(18+1)+6+6+4+4+6
+        self.node_order = np.arange(6) + self.n_siblings * 6 + self.n_siblings * (18 + 1) + 6 + 6 + 4 + 4 + 6
 
         self.siblings_order = []
         for sibling_i in range(self.n_siblings):
-            sibling_order = np.arange(6) + self.n_siblings*6 + sibling_i*19
+            sibling_order = np.arange(6) + self.n_siblings * 6 + sibling_i * 19
             self.siblings_order.append(sibling_order)
         self.siblings_order = np.concatenate(self.siblings_order)
 
         self.parents_order = [
-            np.arange(6) + self.n_siblings*6+self.n_siblings*(18+1)+6+6+4+4+6 + 6,
-            np.arange(6) + self.n_siblings*6+self.n_siblings*(18+1)+6+6+4+4+6 + 12,
+            np.arange(6) + self.n_siblings * 6 + self.n_siblings * (18 + 1) + 6 + 6 + 4 + 4 + 6 + 6,
+            np.arange(6) + self.n_siblings * 6 + self.n_siblings * (18 + 1) + 6 + 6 + 4 + 4 + 6 + 12,
         ]
         self.parents_order = np.concatenate(self.parents_order)
 
@@ -373,7 +374,7 @@ class LayoutMLP(MLP):
             self.parents_output_shapes
         ])
         self.features_with_dims_complement = np.array([
-            i for i in range(149-(1+2+self.n_siblings)) if i not in self.features_with_dims])
+            i for i in range(149 - (1 + 2 + self.n_siblings)) if i not in self.features_with_dims])
 
         self.best_val_subsets = {
             'layout:nlp:random': 0.0,
@@ -410,8 +411,9 @@ class LayoutMLP(MLP):
             )
 
         subset_info = self.text_vectorization(subset_info)
-        one_hot_subset = tf.one_hot(subset_info-2, depth=4)
-        one_hot_subset = tf.expand_dims(one_hot_subset, axis=-1)
+        subset_info = tf.expand_dims(subset_info, axis=-1)
+        subset_info = self.embedding_layer_subset_info(subset_info)
+        subset_info = subset_info[:, 0, :]
 
         # reduce unnecessary computation, sometimes is useful
         # valid_mask_max = tf.reduce_max(valid_mask)
@@ -426,7 +428,7 @@ class LayoutMLP(MLP):
         # node_embedding.shape == (batch_size, mask_max_len, (1+2+self.n_siblings), embed_len)
         node_embedding = tf.reshape(
             node_embedding,
-            (-1, tf.shape(node_embedding)[1], n_opcodes*self.node_embedding_size))
+            (-1, tf.shape(node_embedding)[1], n_opcodes * self.node_embedding_size))
 
         node_descriptor_wo_shapes = tf.gather(
             node_descriptor,
@@ -451,10 +453,10 @@ class LayoutMLP(MLP):
         new_order = tf.cast(new_order, tf.int32)
 
         reordered_shape_list = []
-        for i in range(1+2+self.n_siblings):
+        for i in range(1 + 2 + self.n_siblings):
             reordered_shapes = tf.gather(
-                node_descriptor_shapes[:, :, i*6:(i+1)*6],
-                new_order[:, :, i*6:(i+1)*6],
+                node_descriptor_shapes[:, :, i * 6:(i + 1) * 6],
+                new_order[:, :, i * 6:(i + 1) * 6],
                 axis=2,
                 batch_dims=2
             )
@@ -468,7 +470,7 @@ class LayoutMLP(MLP):
 
         node_descriptor_shapes = tf.clip_by_value(
             node_descriptor_shapes,
-            clip_value_min=1/np.e,
+            clip_value_min=1 / np.e,
             clip_value_max=1e10
         )
         node_descriptor_shapes = tf.math.log(node_descriptor_shapes)
@@ -489,7 +491,7 @@ class LayoutMLP(MLP):
         x = self.dense_layer_node_2(x)
         x = self.activation(x)  # (batch_size, n_config_nodes_upper_limit, n_units)
         x = self.dropout_node_2_3(x, training=training)
-        
+
         x = self.dense_layer_node_3(x)
         x = self.activation(x)
 
@@ -502,14 +504,8 @@ class LayoutMLP(MLP):
         x = tf.reduce_sum(x, axis=1)
         x = x / tf.expand_dims(tf.cast(valid_mask, tf.float32), axis=-1)
 
-        x = tf.concat([x, graph_descriptor], axis=-1)
+        x = tf.concat([x, graph_descriptor, subset_info], axis=-1)
         x = self.dense_layer_global_1(x)
-
-        global_1_layer_size = tf.shape(x)[1]
-        x = tf.reshape(x, (-1, 4, global_1_layer_size // 4))
-        x = x * one_hot_subset
-        x = tf.reduce_sum(x, axis=1)
-
         x = self.activation(x)
         x = self.dense_layer_global_2(x)
         x = self.activation(x)
@@ -599,7 +595,7 @@ class LayoutMLP(MLP):
             if i % 200 == 0:
                 config_descriptors = batch['node_descriptor']
                 valid_nodes = batch['valid_nodes']  # ignore zero padding
-                node_descriptor = config_descriptors[:, :, :-(1+2+self.n_siblings)].numpy()
+                node_descriptor = config_descriptors[:, :, :-(1 + 2 + self.n_siblings)].numpy()
 
                 node_descriptor_wo_shapes = node_descriptor[:, :, self.features_with_dims_complement]
                 node_descriptor_shapes = node_descriptor[:, :, self.features_with_dims]
