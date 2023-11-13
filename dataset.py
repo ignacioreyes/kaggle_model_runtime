@@ -292,7 +292,7 @@ class LayoutDataset:
                 'test',
                 overwrite=False,
                 n_siblings=self.n_siblings,
-                max_nodes=2400,
+                max_nodes=n_config_nodes_upper_limit,
                 remove_duplicates=False
             )
             self.create_tfrecords(
@@ -300,7 +300,7 @@ class LayoutDataset:
                 overwrite=False,
                 n_siblings=self.n_siblings,
                 max_trials_per_graph=1_000,
-                max_nodes=2400,
+                max_nodes=n_config_nodes_upper_limit,
                 remove_duplicates=False
             )
 
@@ -641,6 +641,7 @@ class Layout:
             selected_nodes_local = np.random.choice(
                 selected_nodes_local,
                 self.max_nodes,
+                replace=False,
                 p=self.node_probs
             )
 
