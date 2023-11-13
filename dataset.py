@@ -35,7 +35,7 @@ class TileDataset:
         self.root_dir = 'predict-ai-model-runtime/npz_all/npz/tile/xla'
         self.tfrecords_dir = os.path.join(
             os.path.dirname(os.path.abspath(__file__)),
-            'tile_tfrecords_v2')
+            'tile_tfrecords_v3')
         self.batch_size = batch_size
         self.batch_per_file_size = batch_per_file_size
 
@@ -53,14 +53,28 @@ class TileDataset:
         filenames_list = self._list_filenames(set_name)
         if not os.path.exists(self.tfrecords_dir):
             os.mkdir(self.tfrecords_dir)
+
+        max_trials = None
+        remove_duplicates = False
+        if set_name == 'train':
+            max_trials = 160
+            remove_duplicates = True
+
         self.write_tfrecords(
-            filenames_list, set_name, self.tfrecords_dir)
+            filenames_list,
+            set_name,
+            self.tfrecords_dir,
+            max_trials,
+            remove_duplicates)
 
     def write_tfrecords(
             self,
             filenames: List[str],
             set_name: str,
-            output_folder: str):
+            output_folder: str,
+            max_trials: Optional[int],
+            remove_duplicates: bool
+    ):
 
         for filename in tqdm(filenames, desc=f'loading {set_name}'):
             tile_dict = dict(np.load(filename))
@@ -73,11 +87,12 @@ class TileDataset:
                 output_folder,
                 tile_id + f':{set_name}.tfrecords')
 
-            n_configs = len(tile_dict['config_feat'])
-            target = -100.0 * np.ones(n_configs)
-            if set_name != 'test':
-                target = tile_dict['config_runtime'] / tile_dict['config_runtime_normalizers']
-                target = np.log(target)
+            n_trials = len(tile_dict['config_feat'])
+            if set_name == 'test':
+                target = -100.0 * np.ones(n_trials)
+            else:
+                target_wo_log = tile_dict['config_runtime'] / tile_dict['config_runtime_normalizers']
+                target = np.log(target_wo_log)
             # target.shape == (n_configs,)
 
             graph_descriptor = self.compute_graph_description(
@@ -86,10 +101,31 @@ class TileDataset:
             config_descriptor = tile_dict['config_feat']
             # config_descriptor.shape == (n_configs, 24)
 
-            new_order = np.random.permutation(np.arange(n_configs))
-            target = target[new_order]
-            config_descriptor = config_descriptor[new_order]
+            if remove_duplicates:
+                assert set_name == 'train'
+                config_descriptor, target = self.remove_duplicated_configs(
+                    config_descriptor, target)
+                n_trials = len(target)
 
+            # max trials
+            if max_trials is not None and n_trials > max_trials:
+                assert set_name != 'test'
+                trial_probs = np.exp(-np.exp(target)) + 0.01
+                trial_probs = trial_probs / np.sum(trial_probs)
+                trial_sample = np.random.choice(
+                    np.arange(n_trials),
+                    max_trials,
+                    replace=False,
+                    p=trial_probs
+                )
+                n_trials = max_trials
+            else:
+                trial_sample = np.random.permutation(np.arange(n_trials))
+
+            config_descriptor = config_descriptor[trial_sample]
+            target = target[trial_sample]
+
+            # write
             with tf.io.TFRecordWriter(
                     output_filename,
                     options=tf.io.TFRecordOptions(compression_type='GZIP')) as file_writer:
@@ -99,7 +135,7 @@ class TileDataset:
                 graph_feature = tf.train.Feature(
                     float_list=tf.train.FloatList(value=graph_descriptor))
 
-                for i_sample in range(n_configs):
+                for i_sample in range(n_trials):
                     config_descriptor_serialized = tf.io.serialize_tensor(
                         config_descriptor[i_sample]).numpy()
 
@@ -108,7 +144,7 @@ class TileDataset:
                             feature={
                                 'tile_id': layout_feature,
                                 'config_index': tf.train.Feature(
-                                    int64_list=tf.train.Int64List(value=[new_order[i_sample]])),
+                                    int64_list=tf.train.Int64List(value=[trial_sample[i_sample]])),
                                 'config_descriptor': tf.train.Feature(
                                     bytes_list=tf.train.BytesList(value=[config_descriptor_serialized])),
                                 'graph_descriptor': graph_feature,
@@ -118,6 +154,18 @@ class TileDataset:
                         )
                     )
                     file_writer.write(record_bytes.SerializeToString())
+
+    def remove_duplicated_configs(self, config_descriptor, target):
+        unique_configs, inverse_index = np.unique(
+            config_descriptor, return_inverse=True, axis=0)
+
+        times = []
+        for i, config in enumerate(unique_configs):
+            config_times = target[inverse_index == i]
+            average_time = np.mean(config_times)
+            times.append(average_time)
+
+        return unique_configs, np.array(times)
 
     @staticmethod
     def tfrecord_decoder(record_bytes):
@@ -188,7 +236,6 @@ class TileDataset:
                 self.tfrecord_decoder, num_parallel_calls=tf.data.AUTOTUNE)
             if set_name == 'train':
                 dataset = dataset.shuffle(buffer_size=30)
-                dataset = dataset.take(1250)
                 dataset = dataset.batch(
                     self.batch_per_file_size, drop_remainder=True)
             return dataset
@@ -499,7 +546,10 @@ class Layout:
         n_trials = len(self.config_runtime)
 
         if max_trials is not None and n_trials > max_trials:
-            self.trial_sample = np.random.choice(np.arange(n_trials), max_trials)
+            self.trial_sample = np.random.choice(
+                np.arange(n_trials),
+                size=max_trials,
+                replace=False)
             self.node_config_feat = self.node_config_feat[self.trial_sample]
             self.config_runtime = self.config_runtime[self.trial_sample]
             n_trials = max_trials
@@ -738,18 +788,18 @@ class Layout:
 
 
 if __name__ == '__main__':
-    # dataset = TileDataset(
-    #     batch_size=64,
-    #     batch_per_file_size=8,
-    #     build_tfrecords=False)
+    dataset = TileDataset(
+        batch_size=64,
+        batch_per_file_size=8,
+        build_tfrecords=True)
 
-    dataset = LayoutDataset(
-        batch_size=128,
-        dataset_take=1500,
-        subset=None,
-        build_tfrecords=False,
-        batch_per_file_size=8
-    )
+    # dataset = LayoutDataset(
+    #     batch_size=128,
+    #     dataset_take=1500,
+    #     subset=None,
+    #     build_tfrecords=False,
+    #     batch_per_file_size=8
+    # )
 
     for batch in dataset.train_data:
         for k, v in batch.items():
