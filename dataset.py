@@ -270,7 +270,7 @@ class LayoutDataset:
         self.root_dir = 'predict-ai-model-runtime/npz_all/npz/layout/'
         self.tfrecords_dir = os.path.join(
             os.path.dirname(os.path.abspath(__file__)),
-            'layout_tfrecords_v5')
+            'layout_tfrecords_v6')
         self.batch_size = batch_size
         n_config_nodes_upper_limit = 1000
         max_trials_training = 7500  # None
@@ -681,14 +681,14 @@ class Layout:
             axis=1
         )
 
-        padding_size = self.max_nodes - n_config_nodes
-        if padding_size > 0:
-            features = np.concatenate(
-                [
-                    features,
-                    np.zeros((padding_size, features.shape[1]),
-                             dtype=np.float32)],
-                axis=0)
+        # padding_size = self.max_nodes - n_config_nodes
+        # if padding_size > 0:
+        #     features = np.concatenate(
+        #         [
+        #             features,
+        #             np.zeros((padding_size, features.shape[1]),
+        #                      dtype=np.float32)],
+        #         axis=0)
 
         features = features.astype(np.float32)
         return features, n_valid_nodes
@@ -786,18 +786,17 @@ class Layout:
 
 
 if __name__ == '__main__':
-    dataset = TileDataset(
-        batch_size=64,
-        batch_per_file_size=8,
-        build_tfrecords=True)
+    # dataset = TileDataset(
+    #     batch_size=64,
+    #     batch_per_file_size=8,
+    #     build_tfrecords=True)
 
-    # dataset = LayoutDataset(
-    #     batch_size=128,
-    #     dataset_take=1500,
-    #     subset=None,
-    #     build_tfrecords=False,
-    #     batch_per_file_size=8
-    # )
+    dataset = LayoutDataset(
+        batch_size=128,
+        dataset_take=1500,
+        build_tfrecords=True,
+        batch_per_file_size=8
+    )
 
     for batch in dataset.train_data:
         for k, v in batch.items():
