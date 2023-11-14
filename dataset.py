@@ -362,17 +362,18 @@ class LayoutDataset:
         datasets = []
         for subset, v in filenames_dict.items():
             random.shuffle(v)  # inplace
+            shuffle = False  # shuffle inside tf.data.Dataset
             if set_name == 'test':
                 take = 10000
             elif set_name == 'valid':
                 take = 1000
-            elif 'xla' in subset:
-                take = self.dataset_take * 3
             else:
                 take = self.dataset_take
+                if 'xla' in subset:
+                    shuffle = True
 
-            print(set_name, subset, take)
-            datasets.append(self.build_dataset_from_filenames(v, set_name, take))
+            print(set_name, subset, take, shuffle)
+            datasets.append(self.build_dataset_from_filenames(v, set_name, take, shuffle))
 
         if set_name == 'train':
             datasets = [dataset.repeat() for dataset in datasets]
@@ -387,11 +388,13 @@ class LayoutDataset:
             final_dataset = datasets[0]
             final_dataset = final_dataset.batch(self.batch_size)
 
-        final_dataset = final_dataset.prefetch(2)
+        final_dataset = final_dataset.prefetch(5)
 
         return final_dataset
 
-    def build_dataset_from_filenames(self, filenames: List[str], set_name: str, take: int) -> tf.data.Dataset:
+    def build_dataset_from_filenames(
+            self, filenames: List[str],
+            set_name: str, take: int, shuffle: bool) -> tf.data.Dataset:
         assert set_name in ('train', 'valid', 'test')
         dataset = tf.data.Dataset.from_tensor_slices(filenames)
 
@@ -399,15 +402,15 @@ class LayoutDataset:
             dataset = tf.data.TFRecordDataset(filename, compression_type='GZIP')
             dataset = dataset.map(self.tfrecord_decoder, num_parallel_calls=8)
             if set_name == 'train':
-                # dataset = dataset.shuffle(buffer_size=20)
+                if shuffle:
+                    dataset = dataset.shuffle(buffer_size=16)
                 dataset = dataset.take(take)
                 dataset = dataset.batch(self.batch_per_file_size, drop_remainder=True)
             return dataset
 
         dataset = dataset.interleave(
             interleave_fn,
-            cycle_length=len(filenames),
-            deterministic=False)
+            cycle_length=len(filenames))
         return dataset
 
     def _list_filenames(self, set_name: str) -> List[str]:
@@ -805,7 +808,7 @@ if __name__ == '__main__':
 
     dataset = LayoutDataset(
         batch_size=128,
-        dataset_take=1500,
+        dataset_take=8500,
         build_tfrecords=False,
         batch_per_file_size=8
     )
