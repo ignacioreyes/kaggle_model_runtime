@@ -272,7 +272,7 @@ class LayoutDataset:
             os.path.dirname(os.path.abspath(__file__)),
             'layout_tfrecords_v6')
         self.batch_size = batch_size
-        n_config_nodes_upper_limit = 1000
+        self.max_nodes = 1000
         max_trials_training = 7500  # None
         self.n_siblings = 3
         self.batch_per_file_size = batch_per_file_size
@@ -284,14 +284,14 @@ class LayoutDataset:
                 overwrite=False,
                 n_siblings=self.n_siblings,
                 max_trials_per_graph=max_trials_training,
-                max_nodes=n_config_nodes_upper_limit,
+                max_nodes=self.max_nodes,
                 remove_duplicates=True
             )
             self.create_tfrecords(
                 'test',
                 overwrite=False,
                 n_siblings=self.n_siblings,
-                max_nodes=n_config_nodes_upper_limit,
+                max_nodes=self.max_nodes,
                 remove_duplicates=False
             )
             self.create_tfrecords(
@@ -299,7 +299,7 @@ class LayoutDataset:
                 overwrite=False,
                 n_siblings=self.n_siblings,
                 max_trials_per_graph=1_000,
-                max_nodes=n_config_nodes_upper_limit,
+                max_nodes=self.max_nodes,
                 remove_duplicates=False
             )
 
@@ -308,8 +308,7 @@ class LayoutDataset:
             self.test_data = self.load_tfrecords('test')
             self.valid_data = self.load_tfrecords('valid')
 
-    @staticmethod
-    def tfrecord_decoder(record_bytes):
+    def tfrecord_decoder(self, record_bytes):
         parsed_example = tf.io.parse_single_example(
             record_bytes,
 
@@ -325,6 +324,20 @@ class LayoutDataset:
         parsed_example['node_descriptor'] = tf.io.parse_tensor(
             parsed_example['node_descriptor'], tf.float32
         )
+
+        node_descriptor = parsed_example['node_descriptor']
+        node_shape = tf.shape(node_descriptor)
+        n_config_nodes = node_shape[0]
+        n_features = node_shape[1]
+
+        padding_size = self.max_nodes - n_config_nodes
+        if padding_size > 0:
+            node_descriptor = tf.concat(
+                [
+                    node_descriptor,
+                    tf.zeros(shape=(padding_size, n_features), dtype=tf.float32)
+                ], axis=0)
+        parsed_example['node_descriptor'] = node_descriptor
         return parsed_example
 
     def load_tfrecords(self, set_name: str) -> tf.data.Dataset:
@@ -384,7 +397,7 @@ class LayoutDataset:
 
         def interleave_fn(filename: str) -> tf.data.Dataset:
             dataset = tf.data.TFRecordDataset(filename, compression_type='GZIP')
-            dataset = dataset.map(self.tfrecord_decoder, num_parallel_calls=4)
+            dataset = dataset.map(self.tfrecord_decoder, num_parallel_calls=8)
             if set_name == 'train':
                 # dataset = dataset.shuffle(buffer_size=20)
                 dataset = dataset.take(take)
@@ -393,8 +406,7 @@ class LayoutDataset:
 
         dataset = dataset.interleave(
             interleave_fn,
-            cycle_length=50,
-            num_parallel_calls=8,
+            cycle_length=len(filenames),
             deterministic=False)
         return dataset
 
@@ -794,14 +806,19 @@ if __name__ == '__main__':
     dataset = LayoutDataset(
         batch_size=128,
         dataset_take=1500,
-        build_tfrecords=True,
+        build_tfrecords=False,
         batch_per_file_size=8
     )
 
-    for batch in dataset.train_data:
-        for k, v in batch.items():
-            print(k, v.shape)
-        break
+    import time
+    t0 = time.time()
+    for i, batch in enumerate(dataset.train_data):
+        if i % 10 == 0:
+            dt = time.time() - t0
+            print(batch['layout_id'][0], dt)
+            t0 = time.time()
+        if i > 5000:
+            break
 
     for batch in dataset.test_data:
         for k, v in batch.items():
