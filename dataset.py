@@ -808,7 +808,7 @@ if __name__ == '__main__':
 
     dataset = LayoutDataset(
         batch_size=128,
-        dataset_take=8500,
+        dataset_take=7500,
         build_tfrecords=False,
         batch_per_file_size=8
     )

@@ -299,7 +299,6 @@ class LayoutMLP(MLP):
         self.dense_layer_global_2 = Dense(
             layer_sizes[4],
             name='dense_layer_global_2',
-            activation='tanh'
         )
         self.dense_layer_global_3 = Dense(
             1,
@@ -507,6 +506,7 @@ class LayoutMLP(MLP):
         x = self.dense_layer_global_1(x)
         x = self.activation(x)
         x = self.dense_layer_global_2(x)
+        x = self.activation(x)
         x = self.dense_layer_global_3(x)
         x = tf.reshape(x, (-1,))
         return x
