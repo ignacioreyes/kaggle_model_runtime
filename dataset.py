@@ -270,7 +270,7 @@ class LayoutDataset:
         self.root_dir = 'predict-ai-model-runtime/npz_all/npz/layout/'
         self.tfrecords_dir = os.path.join(
             os.path.dirname(os.path.abspath(__file__)),
-            'layout_tfrecords_v6')
+            'layout_tfrecords_v7')
         self.batch_size = batch_size
         self.max_nodes = 1000
         max_trials_training = 7500  # None
@@ -471,14 +471,18 @@ class LayoutDataset:
                 remove_duplicates: bool
         ):
             os.environ["CUDA_VISIBLE_DEVICES"] = ""
-            layout = Layout(filename, n_siblings=n_siblings,
-                            max_trials=max_trials, max_nodes=max_nodes,
-                            remove_duplicates=remove_duplicates)
-            layout_id = layout.layout_id
+
+            filename_split = filename.split('/')
+            filename_wo_ext = filename_split[-1][:-len('.npz')]
+            layout_id = f'layout:{filename_split[-4]}:{filename_split[-3]}:{filename_wo_ext}'
 
             output_filename = os.path.join(output_folder, layout_id + f':{set_name}.tfrecords')
             if not overwrite and os.path.exists(output_filename):
                 return
+
+            layout = Layout(filename, n_siblings=n_siblings,
+                            max_trials=max_trials, max_nodes=max_nodes,
+                            remove_duplicates=remove_duplicates)
             
             with tf.io.TFRecordWriter(
                     output_filename,
@@ -517,7 +521,7 @@ class LayoutDataset:
             tasks.append(delayed(write_one_tfrecord)(
                 filename, n_siblings, max_trials, max_nodes, remove_duplicates))
 
-        Parallel(n_jobs=6, verbose=11, backend='loky')(tasks)
+        Parallel(n_jobs=8, verbose=11, backend='loky')(tasks)
 
 
 class Layout:
@@ -591,8 +595,8 @@ class Layout:
         times = []
         for i, config in enumerate(unique_configs):
             config_times = self.config_runtime[inverse_index == i]
-            average_time = np.mean(config_times)
-            times.append(average_time)
+            median_time = np.median(config_times)
+            times.append(median_time)
 
         self.node_config_feat = unique_configs
         self.config_runtime = np.array(times)
@@ -601,8 +605,10 @@ class Layout:
         if len(self.node_config_ids) <= self.max_nodes:
             return None
         node_stds = np.max(np.std(self.node_config_feat, axis=0), axis=1)
-        node_stds = np.clip(node_stds, a_min=1e-6, a_max=None)
-        return node_stds / np.sum(node_stds)
+        node_probs = node_stds / np.sum(node_stds)
+        node_probs += 0.01
+        node_probs = node_probs / np.sum(node_probs)
+        return node_probs
 
     def compute_graph_description(self) -> np.ndarray:
         nodes, counts = np.unique(self.node_opcode, return_counts=True)
@@ -809,7 +815,7 @@ if __name__ == '__main__':
     dataset = LayoutDataset(
         batch_size=128,
         dataset_take=7500,
-        build_tfrecords=False,
+        build_tfrecords=True,
         batch_per_file_size=8
     )
 
